@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.3";
+    public const string Version = "0.3.0.4";
 
     internal static ManualLogSource Logger;
 

@@ -27,19 +27,23 @@ internal static class RenderState
     {
         if (Alive(t) && !texts.ContainsKey(t.Pointer)) texts.Add(t.Pointer, new TextState(t));
     }
-    internal static void Float(Material m, int id, float value)
+    // Renderer, deren Bild sich durch Material-, Sprite- oder Sichtbarkeitsaenderungen unterscheidet.
+    internal static readonly List<Renderer> Owners = new();
+    internal static void Float(Material m, int id, float value, Renderer owner = null)
     {
         if (!Alive(m) || !m.HasProperty(id)) return;
         float old = m.GetFloat(id);
         if (old == value) return;
         floats.Add((m, id, old)); m.SetFloat(id, value);
+        if (Alive(owner)) Owners.Add(owner);
     }
-    internal static void Color(Material m, int id, Color value)
+    internal static void Color(Material m, int id, Color value, Renderer owner = null)
     {
         if (!Alive(m) || !m.HasProperty(id)) return;
         Color old = m.GetColor(id);
         if (old == value) return;
         colors.Add((m, id, old)); m.SetColor(id, value);
+        if (Alive(owner)) Owners.Add(owner);
     }
     internal static void Active(GameObject go, bool value)
     {
@@ -51,8 +55,13 @@ internal static class RenderState
     {
         if (!Alive(r) || r.enabled == value) return;
         renderers.Add((r, r.enabled)); r.enabled = value;
+        Owners.Add(r);
     }
-    internal static void Sprite(SpriteRenderer r) => sprites.Add((r, r.sprite, r.color));
+    internal static void Sprite(SpriteRenderer r) { sprites.Add((r, r.sprite, r.color)); Owners.Add(r); }
+    internal static void ChangedTexts(List<TMP_Text> into)
+    {
+        foreach (var t in texts.Values) if (Alive(t.Target) && Changed(t)) into.Add(t.Target);
+    }
     private static bool Changed(TextState t) => t.Target.text != t.Value || t.Target.color != t.Color;
     internal static void Flush()
     {
@@ -72,7 +81,7 @@ internal static class RenderState
         foreach (var x in objects) if (Alive(x.go)) x.go.SetActive(x.active);
         foreach (var x in sprites) if (Alive(x.renderer)) { x.renderer.sprite = x.sprite; x.renderer.color = x.color; }
         foreach (var x in renderers) if (Alive(x.target)) x.target.enabled = x.enabled;
-        texts.Clear(); floats.Clear(); colors.Clear(); objects.Clear(); sprites.Clear(); renderers.Clear();
+        texts.Clear(); floats.Clear(); colors.Clear(); objects.Clear(); sprites.Clear(); renderers.Clear(); Owners.Clear();
     }
 }
 
@@ -107,7 +116,7 @@ internal static class EventVisuals
         var ship = ShipStatus.Instance;
         if (RenderState.Alive(ship))
             foreach (var v in ship.AllVents)
-                if (RenderState.Alive(v) && RenderState.Alive(v.myRend)) RenderState.Float(v.myRend.material, outline, 0f);
+                if (RenderState.Alive(v) && RenderState.Alive(v.myRend)) RenderState.Float(v.myRend.material, outline, 0f, v.myRend);
         var hud = HudManager.Instance;
         if (SmokescreenPlugin.HideFlashes.Value && Time.time < FlashUntil && RenderState.Alive(hud))
         {
@@ -130,8 +139,8 @@ internal static class EventVisuals
             {
                 if (!RenderState.Alive(vote)) continue;
                 var mat = vote.material;
-                RenderState.Color(mat, PlayerMaterial.BodyColor, Palette.DisabledGrey);
-                RenderState.Color(mat, PlayerMaterial.BackColor, Palette.DisabledGrey);
+                RenderState.Color(mat, PlayerMaterial.BodyColor, Palette.DisabledGrey, vote);
+                RenderState.Color(mat, PlayerMaterial.BackColor, Palette.DisabledGrey, vote);
             }
         }
     }

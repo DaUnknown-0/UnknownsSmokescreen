@@ -69,6 +69,7 @@ internal static class Mask
     // --- bookkeeping of what we switched off --------------------------------------------------------
 
     private static readonly Dictionary<IntPtr, Renderer> hidden = new();
+    internal static Dictionary<IntPtr, Renderer>.ValueCollection Hidden => hidden.Values;
     private static readonly Dictionary<IntPtr, (int frame, Renderer[] list)> rendererCache = new();
     internal static readonly List<Arrow> Arrows = new();
 
@@ -76,6 +77,7 @@ internal static class Mask
     {
         RestoreAll();
         rendererCache.Clear();
+        PrivateSet.Reset();
         Arrows.RemoveAll(a => a == null || !Alive(a.arrow));
         phoneUi = null;
         infoCache.Clear();
@@ -343,7 +345,7 @@ internal static class Mask
         var body = p.cosmetics.currentBodySprite;
         if (body == null || !Alive(body.BodySprite)) return;
         var mat = body.BodySprite.material;
-        if (Alive(mat)) RenderState.Float(mat, OutlineId, 0f);
+        if (Alive(mat)) RenderState.Float(mat, OutlineId, 0f, body.BodySprite);
     }
 
     // --- sabotage map --------------------------------------------------------------------------------------
@@ -389,7 +391,7 @@ internal static class Mask
                 RenderState.Active(intro.ImpostorText.gameObject, true);
             if (intro.ImpostorText.gameObject.activeSelf) SetText(intro.ImpostorText, ImpostorLine());
         }
-        if (Alive(intro.BackgroundBar) && Alive(intro.BackgroundBar.material)) RenderState.Color(intro.BackgroundBar.material, Shader.PropertyToID("_Color"), team);
+        if (Alive(intro.BackgroundBar) && Alive(intro.BackgroundBar.material)) RenderState.Color(intro.BackgroundBar.material, Shader.PropertyToID("_Color"), team, intro.BackgroundBar);
         if (Alive(intro.YouAreText)) intro.YouAreText.color = team;
         if (Alive(intro.RoleText)) { SetText(intro.RoleText, CrewAppearance.Name); intro.RoleText.color = team; }
         if (Alive(intro.RoleBlurbText)) { SetText(intro.RoleBlurbText, CrewAppearance.Description); intro.RoleBlurbText.color = team; }

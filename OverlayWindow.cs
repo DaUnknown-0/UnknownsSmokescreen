@@ -1,5 +1,6 @@
 // Copyright (C) 2026 DaUnknown-0. GPL-3.0-or-later.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -8,35 +9,33 @@ using System.Threading;
 
 namespace UnknownsSmokescreen;
 
+// Eigener Win32-Thread ohne Unity- oder Il2Cpp-Zugriffe. Er baut die Inseln aus den Rohbildern,
+// setzt sie pro Spielframe an ihre Ankerlage und aktualisiert nur das geaenderte Rechteck.
 internal static class OverlayHost
 {
     private static readonly object gate = new();
     private static Thread thread;
     private static volatile bool running, show, feedActive, protectedWindow;
     internal static volatile bool ProtectionFailed;
+    internal static volatile bool DiagnosticCapture;
     private static bool wantPrivate, wantRecording;
     private static IntPtr priv, rec, game;
     private static Native.WndProc proc;
     private static readonly Native.EnumProc enumerate = FindCandidate;
     private static readonly StringBuilder className = new(256);
     private static readonly uint pid = (uint)Environment.ProcessId;
-    private static byte[] pixels, truth;
-    private static int width, height, version;
-    private static long publishedAt;
-    private static Surface surface, recording;
-    private static int presented = -1, recorded = -1;
-    private static bool shown;
+    private const uint WM_POSITIONS = 0x8001, WM_CAPTURE = 0x8002, WM_FEED = 0x8003;
     private static string diagnosticDirectory;
-    private static int dumpCount;
-    private static string diagnosticRequest;
     private static long diagnosticDeadline;
-    private static OpaqueTiles tiles;
-    private static int tileEpoch = -1;
-    private static long workerFrames, workerTicks, workerReportAt;
+    private static int dumpCount;
     internal static IntPtr GameWindow => game;
     internal static bool GameForeground => game != IntPtr.Zero && Native.GetForegroundWindow() == game && !Native.IsIconic(game);
-    internal static bool CanRender => (wantRecording && feedActive) || (GameForeground && protectedWindow && wantPrivate && show);
+    // Aufnahme nur fuer ein verifiziert geschuetztes Fenster. Diagnose misst auch ohne Vordergrund, zeigt dann aber nichts.
+    internal static bool PrivateWanted => wantPrivate && protectedWindow && show && (GameForeground || DiagnosticCapture);
+    internal static bool FeedWanted => wantRecording && feedActive;
+    internal static string DiagnosticDirectory => diagnosticDirectory != null && Environment.TickCount64 <= diagnosticDeadline ? diagnosticDirectory : null;
     internal static void SetVisible(bool value, bool record = false) { show = value; feedActive = record; }
+
     internal static void Start(bool privateOverlay, bool recordingFeed)
     {
         if (thread != null || (!privateOverlay && !recordingFeed)) return;
@@ -57,116 +56,230 @@ internal static class OverlayHost
         if (hwnd != IntPtr.Zero) Native.PostMessageW(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero);
         thread?.Join(2000); thread = null;
     }
-    // Zwei rohe Bildpaare: Hauptthread kopiert, Fensterthread vergleicht.
-    // Unity-Zeiger verlassen Publish nie und bleiben nicht ueber einen Frame erhalten.
-    private sealed class FramePair
+    internal static void EndDiagnostic() { diagnosticDirectory = null; }
+
+    // --- Uebergabe vom Hauptthread ------------------------------------------------------------------
+
+    internal sealed class CaptureSet
     {
-        internal readonly byte[] Real, Masked;
-        internal readonly int Width, Height;
+        internal byte[] Atlas = Array.Empty<byte>();
+        internal IslandDesc[] Islands = new IslandDesc[64];
+        internal int Stride, AtlasWidth, AtlasHeight, Width, Height, Count, Epoch;
+        internal float Ortho;
         internal long CapturedAt;
-        internal int Epoch;
-        internal bool CoverAll;
-        internal FramePair(int w, int h)
-        {
-            Width = w; Height = h;
-            Real = new byte[checked(w * h * 4)]; Masked = new byte[Real.Length];
-        }
+        internal bool Empty;
     }
-    private static FramePair available, pending, reserve;
-    private static int bufferWidth, bufferHeight, epoch;
+    private static readonly Stack<CaptureSet> free = new(new[] { new CaptureSet(), new CaptureSet(), new CaptureSet() });
+    private static CaptureSet pending;
+    private static int epoch;
+    private static bool clearRequested;
+    private static readonly AnchorPositions incoming = new(), current = new();
+    private static bool positionsPending;
+    private static int postedPositions, postedCapture;
+    private static byte[] feedFill, feedReady;
+    private static int feedWidth, feedHeight;
+    private static bool feedPending;
+
+    internal static CaptureSet BeginCapture(int w, int h, int atlasWidth, int atlasHeight)
+    {
+        CaptureSet set;
+        lock (gate)
+        {
+            if (free.Count > 0) set = free.Pop();
+            else if (pending != null) { set = pending; pending = null; }
+            else return null;
+        }
+        int bytes = checked(atlasWidth * atlasHeight * 4);
+        if (set.Atlas.Length < bytes) set.Atlas = new byte[bytes];
+        set.Width = w; set.Height = h; set.AtlasWidth = atlasWidth; set.AtlasHeight = atlasHeight;
+        set.Stride = atlasWidth * 4; set.Count = 0; set.Empty = false; set.Ortho = 0;
+        set.CapturedAt = Environment.TickCount64;
+        return set;
+    }
+    internal static void EnsureIslands(CaptureSet set, int count)
+    {
+        if (set.Islands.Length < count) set.Islands = new IslandDesc[count + 16];
+    }
+    internal static void CommitCapture(CaptureSet set)
+    {
+        lock (gate) { set.Epoch = epoch; if (pending != null) free.Push(pending); pending = set; }
+        if (Interlocked.Exchange(ref postedCapture, 1) == 0) Post(WM_CAPTURE);
+    }
+    internal static void PublishEmpty(int w, int h)
+    {
+        var set = BeginCapture(w, h, 0, 0);
+        if (set == null) return;
+        set.Empty = true;
+        CommitCapture(set);
+    }
+    internal static void PublishPositions(AnchorPositions positions)
+    {
+        lock (gate)
+        {
+            // Eine noch nicht verarbeitete Diagnoseprobe wird nicht von einem spaeteren Frame ueberschrieben.
+            if (positionsPending && incoming.Probe != null) return;
+            incoming.CopyFrom(positions); positionsPending = true;
+        }
+        if (Interlocked.Exchange(ref postedPositions, 1) == 0) Post(WM_POSITIONS);
+    }
+    internal static void PublishFeed(IntPtr rgba, int w, int h)
+    {
+        int bytes = checked(w * h * 4);
+        byte[] buffer;
+        lock (gate) { buffer = feedFill; feedFill = null; }
+        if (buffer == null || buffer.Length != bytes) buffer = new byte[bytes];
+        Marshal.Copy(rgba, buffer, 0, bytes);
+        lock (gate) { feedFill = feedReady; feedReady = buffer; feedWidth = w; feedHeight = h; feedPending = true; }
+        Post(WM_FEED);
+    }
     internal static void Discard()
     {
         lock (gate)
         {
-            if (bufferWidth == 0) return;
-            epoch++; pending = available = reserve = null;
-            bufferWidth = bufferHeight = 0;
-            publishedAt = 0;
+            epoch++;
+            if (pending != null) { free.Push(pending); pending = null; }
+            positionsPending = false; clearRequested = true;
         }
+        Post(WM_CAPTURE);
     }
-    internal static void Publish(IntPtr real, IntPtr masked, int w, int h, bool coverAll = false)
+    private static void Post(uint message)
     {
-        FramePair frame;
-        lock (gate)
+        var host = priv != IntPtr.Zero ? priv : rec;
+        if (host != IntPtr.Zero) Native.PostMessageW(host, message, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    // --- Fensterthread ------------------------------------------------------------------------------
+
+    private static LayerSurface surface;
+    private static FeedSurface recording;
+    private static readonly Composer composer = new();
+    private static Island[] poolA = new Island[0], poolB = new Island[0];
+    private static bool usePoolA;
+    private static int[] distance;
+    private static byte[] claimed;
+    private static byte[] truth;
+    private static int presentedWidth, presentedHeight, presentedX = int.MinValue, presentedY = int.MinValue;
+    private static bool shown, hasContent, needFull = true;
+    private static long buildTicks, captures, captureTicks, moves, moveTicks, presents, platePixels, seeds, workerReportAt, lastCaptureAt;
+
+    private static unsafe void ProcessCapture()
+    {
+        Interlocked.Exchange(ref postedCapture, 0);
+        CaptureSet set; bool clear;
+        lock (gate) { set = pending; pending = null; clear = clearRequested; clearRequested = false; }
+        if (clear) { composer.Clear(); hasContent = false; needFull = true; }
+        if (set == null) return;
+        try
         {
-            if (bufferWidth != w || bufferHeight != h)
+            if (set.Epoch != epoch || surface == null) return;
+            long start = Stopwatch.GetTimestamp();
+            if (surface.Ensure(set.Width, set.Height)) { composer.Attach(surface.Bits, set.Width, set.Height); needFull = true; }
+            var pool = usePoolA ? poolA : poolB;
+            if (pool.Length < set.Count)
             {
-                epoch++; available = new FramePair(w, h); pending = null; publishedAt = 0;
-                reserve = new FramePair(w, h);
-                bufferWidth = w; bufferHeight = h;
+                var grown = new Island[set.Count + 8];
+                Array.Copy(pool, grown, pool.Length);
+                for (int i = pool.Length; i < grown.Length; i++) grown[i] = new Island();
+                pool = grown;
+                if (usePoolA) poolA = pool; else poolB = pool;
             }
-            frame = available ?? reserve ?? pending;
-            if (frame == null) return;
-            if (ReferenceEquals(frame, available)) available = null;
-            else if (ReferenceEquals(frame, reserve)) reserve = null;
-            else pending = null;
-            frame.Epoch = epoch;
+            usePoolA = !usePoolA;
+            int n = set.Empty ? 0 : set.Count;
+            if (n > 0)
+            {
+                int screen = set.Width * set.Height;
+                if (claimed == null || claimed.Length != screen) claimed = new byte[screen]; else Array.Clear(claimed, 0, screen);
+                fixed (byte* atlas = set.Atlas)
+                    for (int i = 0; i < n; i++)
+                    {
+                        IslandBuilder.Build(atlas, set.Stride, in set.Islands[i], set.Height, pool[i], ref distance, claimed, set.Width);
+                        platePixels += pool[i].PlatePixels; seeds += pool[i].Seeds;
+                    }
+            }
+            buildTicks += Stopwatch.GetTimestamp() - start;
+            hasContent = true; lastCaptureAt = set.CapturedAt;
+            if (composer.Replace(pool, n, set.Ortho, current, out int x0, out int y0, out int x1, out int y1)) Present(x0, y0, x1, y1);
+            captures++; captureTicks += Stopwatch.GetTimestamp() - start;
+            Report();
         }
-        Marshal.Copy(real, frame.Real, 0, frame.Real.Length);
-        Marshal.Copy(masked, frame.Masked, 0, frame.Masked.Length);
-        frame.CapturedAt = Environment.TickCount64;
-        frame.CoverAll = coverAll;
-        lock (gate) { if (pending != null) available = pending; pending = frame; }
+        finally { lock (gate) free.Push(set); }
     }
-    private static unsafe void ProcessPending()
+
+    private static void ProcessPositions()
     {
-        FramePair frame;
-        lock (gate) { frame = pending; pending = null; }
-        if (frame == null) return;
+        Interlocked.Exchange(ref postedPositions, 0);
+        lock (gate) { if (!positionsPending) return; current.CopyFrom(incoming); positionsPending = false; }
         long start = Stopwatch.GetTimestamp();
-        if (tileEpoch != frame.Epoch) { tiles = new OpaqueTiles(); tileEpoch = frame.Epoch; }
-        int length = frame.Real.Length;
-        if (pixels == null || pixels.Length != length)
+        if (composer.Move(current, out int x0, out int y0, out int x1, out int y1)) Present(x0, y0, x1, y1);
+        moves++; moveTicks += Stopwatch.GetTimestamp() - start;
+        if (current.Probe != null)
         {
-            pixels = new byte[length]; truth = wantRecording ? new byte[length] : null;
-        }
-        fixed (byte* r = frame.Real)
-        fixed (byte* m = frame.Masked)
-        fixed (byte* output = pixels)
-        fixed (byte* feed = truth)
-            tiles.Copy(r, m, output, feed, frame.Width, frame.Height, frame.CapturedAt, frame.CoverAll);
-        workerFrames++; workerTicks += Stopwatch.GetTimestamp() - start;
-        if (Environment.TickCount64 >= workerReportAt)
-        {
-            SmokescreenPlugin.Logger.LogInfo($"HUD-Fenster: Ausgaben={workerFrames}, Vergleich/Kacheln={workerTicks * 1000.0 / Stopwatch.Frequency / workerFrames:F3} ms, Kacheln={tiles.CoveredTiles}, Rand={tiles.MarginTiles}, Voll={tiles.FullCoverage}");
-            workerReportAt = Environment.TickCount64 + 15000; workerFrames = workerTicks = 0;
-        }
-        try { DumpPair(frame); }
-        catch (Exception e)
-        {
-            diagnosticDirectory = null;
-            SmokescreenPlugin.Logger.LogWarning("HUD-Diagnose: " + e.Message);
-        }
-        lock (gate)
-        {
-            if (frame.Epoch != epoch) return;
-            width = frame.Width; height = frame.Height; version++; publishedAt = frame.CapturedAt;
-            available = frame;
+            try { DumpProbe(current.Probe, current.Frame); }
+            catch (Exception e) { diagnosticDirectory = null; SmokescreenPlugin.Logger.LogWarning("HUD-Diagnose: " + e.Message); }
         }
     }
-    internal static void EndDiagnostic() { diagnosticDirectory = null; }
-    internal static void RequestDiagnostic(string label)
+
+    private static void ProcessFeed()
     {
-        if (diagnosticDirectory != null) Interlocked.Exchange(ref diagnosticRequest, Path.GetFileName(label));
+        byte[] data; int w, h;
+        lock (gate) { if (!feedPending) return; feedPending = false; data = feedReady; w = feedWidth; h = feedHeight; }
+        if (rec == IntPtr.Zero || data == null) return;
+        if (truth == null || truth.Length != data.Length) truth = new byte[data.Length];
+        unsafe
+        {
+            fixed (byte* source = data)
+            fixed (byte* target = truth)
+                PixelDifference.Copy(source, source, target, null, w, h);
+        }
+        recording.Upload(truth, w, h);
+        Native.InvalidateRect(rec, IntPtr.Zero, false);
     }
-    private static unsafe void DumpPair(FramePair frame)
+
+    private static void Report()
     {
-        string label = Interlocked.Exchange(ref diagnosticRequest, null), directory = diagnosticDirectory;
-        if (label == null || directory == null || Environment.TickCount64 > diagnosticDeadline || dumpCount >= 32) return;
+        if (Environment.TickCount64 < workerReportAt) return;
+        double frequency = Stopwatch.Frequency / 1000.0;
+        SmokescreenPlugin.Logger.LogInfo($"HUD-Fenster: Aufnahmen={captures}, Aufbau={captureTicks / frequency / Math.Max(1, captures):F3} ms (Inseln {buildTicks / frequency / Math.Max(1, captures):F3}), Lagen={moves}, Lage={moveTicks / frequency / Math.Max(1, moves):F3} ms, Ausgaben={presents}, Inseln={composer.Count}, Platte/Aufnahme={platePixels / Math.Max(1, captures)} px, Keime/Aufnahme={seeds / Math.Max(1, captures)}");
+        workerReportAt = Environment.TickCount64 + 15000;
+        buildTicks = captures = captureTicks = moves = moveTicks = presents = platePixels = seeds = 0;
+    }
+
+    private static void Present(int x0, int y0, int x1, int y1)
+    {
+        if (!shown || surface == null) { needFull = true; return; }
+        if (!Native.GetClientRect(game, out var rc)) return;
+        var origin = new Native.POINT(); Native.ClientToScreen(game, ref origin);
+        if (rc.right - rc.left != surface.Width || rc.bottom - rc.top != surface.Height) { Hide(); return; }
+        bool full = needFull || origin.x != presentedX || origin.y != presentedY || surface.Width != presentedWidth || surface.Height != presentedHeight;
+        if (!surface.Present(priv, origin.x, origin.y, full, x0, y0, x1, y1)) { Hide(); return; }
+        presentedX = origin.x; presentedY = origin.y; presentedWidth = surface.Width; presentedHeight = surface.Height;
+        needFull = false; presents++;
+    }
+    private static void Hide()
+    {
+        if (priv != IntPtr.Zero && shown) Native.ShowWindow(priv, 0);
+        shown = false; needFull = true;
+    }
+
+    private static unsafe void DumpProbe(string label, int frame)
+    {
+        string directory = DiagnosticDirectory;
+        if (directory == null || surface == null || dumpCount >= 64) return;
+        dumpCount++;
         Directory.CreateDirectory(directory);
-        string prefix = Path.Combine(directory, $"{label}_{++dumpCount:00}_{frame.CapturedAt}");
-        BitmapFile.Write(prefix + "_overlay.bmp", pixels, frame.Width, frame.Height);
-        var data = new byte[frame.Real.Length];
-        fixed (byte* dst = data)
-        fixed (byte* r = frame.Real)
-        fixed (byte* m = frame.Masked)
+        string prefix = Path.Combine(directory, label + "_" + frame);
+        BitmapFile.Write(prefix + "_overlay.bmp", surface.Bits, surface.Width, surface.Height);
+        var text = new StringBuilder();
+        text.Append($"frame={frame} t={Environment.TickCount64} captured={lastCaptureAt} islands={composer.Count} positions={current.Count} ortho={current.Ortho}\n");
+        var pool = usePoolA ? poolB : poolA;
+        for (int i = 0; i < composer.Count && i < pool.Length; i++)
         {
-            PixelDifference.Copy(r, r, dst, dst, frame.Width, frame.Height);
-            BitmapFile.Write(prefix + "_real.bmp", data, frame.Width, frame.Height);
-            PixelDifference.Copy(m, m, dst, dst, frame.Width, frame.Height);
-            BitmapFile.Write(prefix + "_masked.bmp", data, frame.Width, frame.Height);
+            var s = pool[i];
+            text.Append($"island key={s.Key:X} x={s.X} y={s.Y} w={s.W} h={s.H} drawn={s.Drawn} dx={s.DrawX - s.X} dy={s.DrawY - s.Y} plate={s.PlatePixels} alpha={s.AlphaPixels} seeds={s.Seeds}\n");
         }
+        File.WriteAllText(prefix + "_overlay.txt", text.ToString());
     }
+
     private static bool FindCandidate(IntPtr hwnd, IntPtr unused)
     {
         Native.GetWindowThreadProcessId(hwnd,out uint owner);
@@ -198,13 +311,13 @@ internal static class OverlayHost
                     cls,"Smokescreen Private HUD",Native.WS_POPUP,0,0,16,16,IntPtr.Zero,IntPtr.Zero,instance,IntPtr.Zero);
                 protectedWindow=priv!=IntPtr.Zero && SupportedProtection() && Native.SetWindowDisplayAffinity(priv,Native.WDA_EXCLUDEFROMCAPTURE) && Verify();
                 if(!protectedWindow) { ProtectionFailed=true; if(priv!=IntPtr.Zero) Native.DestroyWindow(priv); priv=IntPtr.Zero; }
-                else { surface=new Surface(); SmokescreenPlugin.Logger.LogInfo("Privates HUD: WDA_EXCLUDEFROMCAPTURE gesetzt und verifiziert"); }
+                else { surface=new LayerSurface(); SmokescreenPlugin.Logger.LogInfo("Privates HUD: WDA_EXCLUDEFROMCAPTURE gesetzt und verifiziert"); }
             }
             if(wantRecording)
             {
                 // Absichtlich verborgen. Benutzer öffnet die Aufnahmequelle separat, nie automatisch über dem Spiel.
                 rec=Native.CreateWindowExW(0,cls,"Smokescreen Recording Feed",Native.WS_OVERLAPPEDWINDOW,Native.CW_USEDEFAULT,Native.CW_USEDEFAULT,640,400,IntPtr.Zero,IntPtr.Zero,instance,IntPtr.Zero);
-                recording=new Surface();
+                recording=new FeedSurface();
                 Native.ShowWindow(rec,7);
             }
             IntPtr host=priv!=IntPtr.Zero?priv:rec;
@@ -218,14 +331,18 @@ internal static class OverlayHost
             protectedWindow=false;
             if(priv!=IntPtr.Zero) { Native.ShowWindow(priv,0); Native.DestroyWindow(priv); }
             if(rec!=IntPtr.Zero) Native.DestroyWindow(rec);
-            surface?.Dispose(); recording?.Dispose(); priv=rec=IntPtr.Zero;
-            lock(gate) { pixels=truth=null; pending=available=reserve=null; }
+            unsafe { composer.Attach(null,0,0); }
+            surface?.Dispose(); recording?.Dispose(); priv=rec=IntPtr.Zero; surface=null;
+            lock(gate) { truth=null; pending=null; feedFill=feedReady=null; }
         }
     }
     private static IntPtr WindowProc(IntPtr hwnd,uint msg,IntPtr w,IntPtr l)
     {
         try
         {
+            if(msg==WM_POSITIONS) { ProcessPositions(); return IntPtr.Zero; }
+            if(msg==WM_CAPTURE) { ProcessCapture(); return IntPtr.Zero; }
+            if(msg==WM_FEED) { ProcessFeed(); return IntPtr.Zero; }
             if(msg==Native.WM_TIMER) { Tick(); return IntPtr.Zero; }
             if(msg==Native.WM_NCHITTEST && hwnd==priv) return (IntPtr)(-1);
             if(msg==Native.WM_PAINT && hwnd==rec)
@@ -236,37 +353,66 @@ internal static class OverlayHost
             }
             if(msg==Native.WM_CLOSE) { if(!running) Native.PostQuitMessage(0); else Native.ShowWindow(hwnd,0); return IntPtr.Zero; }
         }
-        catch(Exception e) { if(priv!=IntPtr.Zero) Native.ShowWindow(priv,0); shown=false; SmokescreenPlugin.Logger.LogWarning("HUD-Ausgabe: "+e.Message); }
+        catch(Exception e) { Hide(); SmokescreenPlugin.Logger.LogWarning("HUD-Ausgabe: "+e.Message); }
         return Native.DefWindowProcW(hwnd,msg,w,l);
     }
     private static void Tick()
     {
-        ProcessPending();
+        ProcessCapture();
+        ProcessPositions();
+        ProcessFeed();
         if(game==IntPtr.Zero || !Native.IsWindow(game)) Native.EnumWindows(enumerate,IntPtr.Zero);
+        if(priv==IntPtr.Zero) return;
         bool safe=protectedWindow && Verify();
         if(protectedWindow && !safe) { protectedWindow=false; ProtectionFailed=true; }
         // Kein Freilegen des Fake-Bilds bei kurzen Renderpausen. Freigabe am Frameende.
-        bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && Interlocked.Read(ref publishedAt)>0;
-        if(!visible) { if(shown) Native.ShowWindow(priv,0); shown=false; }
+        bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && hasContent && surface!=null && surface.Width>0;
+        if(!visible) { Hide(); return; }
+        if(!Native.GetClientRect(game,out var rc) || rc.right-rc.left!=surface.Width || rc.bottom-rc.top!=surface.Height) { Hide(); return; }
+        if(!shown)
         {
-            if(pixels==null) return;
-            if(visible && Native.GetClientRect(game,out var rc))
-            {
-                var origin=new Native.POINT(); Native.ClientToScreen(game,ref origin);
-                // Kein Skalieren eines alten Bildes während eines Auflösungswechsels.
-                if(rc.right-rc.left!=width || rc.bottom-rc.top!=height) { Native.ShowWindow(priv,0); shown=false; return; }
-                if(presented!=version) { surface.Upload(pixels,width,height); presented=version; }
-                if(surface.Present(priv,origin.x,origin.y)) { if(!shown) Native.ShowWindow(priv,4); shown=true; }
-                else { Native.ShowWindow(priv,0); shown=false; }
-            }
-            if(rec!=IntPtr.Zero && truth!=null)
-            {
-                if(feedActive && recorded!=version) { recording.Upload(truth,width,height); recorded=version; Native.InvalidateRect(rec,IntPtr.Zero,false); }
-                else if(!feedActive && recorded!=-1) { Array.Clear(truth,0,truth.Length); recording.Upload(truth,width,height); recorded=-1; Native.InvalidateRect(rec,IntPtr.Zero,false); }
-            }
+            shown=true; needFull=true;
+            Present(0,0,surface.Width,surface.Height);
+            if(shown) Native.ShowWindow(priv,4);
+        }
+        else
+        {
+            var origin=new Native.POINT(); Native.ClientToScreen(game,ref origin);
+            if(origin.x!=presentedX || origin.y!=presentedY) Present(0,0,surface.Width,surface.Height);
         }
     }
-    private sealed class Surface : IDisposable
+
+    // Persistente DIB, in die der Komponist direkt schreibt.
+    private sealed unsafe class LayerSurface : IDisposable
+    {
+        private IntPtr dc,bmp,previous,bits;
+        internal int Width, Height;
+        internal uint* Bits => (uint*)bits;
+        internal bool Ensure(int w,int h)
+        {
+            if(dc==IntPtr.Zero) dc=Native.CreateCompatibleDC(IntPtr.Zero);
+            if(w==Width && h==Height && bmp!=IntPtr.Zero) return false;
+            if(bmp!=IntPtr.Zero) { Native.SelectObject(dc,previous); Native.DeleteObject(bmp); }
+            var bi=new Native.BITMAPINFO { biSize=40,biWidth=w,biHeight=-h,biPlanes=1,biBitCount=32 };
+            bmp=Native.CreateDIBSection(dc,ref bi,0,out bits,IntPtr.Zero,0);
+            if(bmp==IntPtr.Zero) { Width=Height=0; throw new InvalidOperationException("DIB konnte nicht angelegt werden"); }
+            previous=Native.SelectObject(dc,bmp); Width=w; Height=h;
+            return true;
+        }
+        internal bool Present(IntPtr hwnd,int x,int y,bool full,int x0,int y0,int x1,int y1)
+        {
+            var dst=new Native.POINT { x=x,y=y }; var src=new Native.POINT(); var size=new Native.SIZE { cx=Width,cy=Height };
+            var blend=new Native.BLENDFUNCTION { SourceConstantAlpha=255,AlphaFormat=1 };
+            var dirty=new Native.RECT { left=x0,top=y0,right=x1,bottom=y1 };
+            var info=new Native.ULWINFO { cbSize=(uint)sizeof(Native.ULWINFO), pptDst=&dst, psize=&size, hdcSrc=dc, pptSrc=&src, pblend=&blend, dwFlags=Native.ULW_ALPHA, prcDirty=full?null:&dirty };
+            Native.GdiFlush();
+            return Native.UpdateLayeredWindowIndirect(hwnd,&info);
+        }
+        public void Dispose() { if(bmp!=IntPtr.Zero) { Native.SelectObject(dc,previous); Native.DeleteObject(bmp); } if(dc!=IntPtr.Zero) Native.DeleteDC(dc); dc=bmp=bits=IntPtr.Zero; Width=Height=0; }
+    }
+
+    // Aufnehmbares Feed-Fenster, unveraendert gegenueber 0.3.0.3.
+    private sealed class FeedSurface : IDisposable
     {
         private IntPtr dc,bmp,previous,bits;
         private int width,height;
@@ -282,12 +428,6 @@ internal static class OverlayHost
                 previous=Native.SelectObject(dc,bmp); width=w; height=h;
             }
             Marshal.Copy(pixels,0,bits,pixels.Length);
-        }
-        internal bool Present(IntPtr hwnd,int x,int y)
-        {
-            var dst=new Native.POINT { x=x,y=y }; var src=new Native.POINT(); var size=new Native.SIZE { cx=width,cy=height };
-            var blend=new Native.BLENDFUNCTION { SourceConstantAlpha=255,AlphaFormat=1 };
-            return Native.UpdateLayeredWindow(hwnd,IntPtr.Zero,ref dst,ref size,dc,ref src,0,ref blend,2);
         }
         internal void Blit(IntPtr target, IntPtr hwnd)
         {
@@ -310,7 +450,6 @@ internal static class Native
     public const uint WM_TIMER = 0x0113, WM_NCHITTEST = 0x0084, WM_PAINT = 0x000F, WM_CLOSE = 0x0010;
     public const uint WDA_EXCLUDEFROMCAPTURE = 0x11;
     public const uint ULW_ALPHA = 2;
-    public const uint ANTIALIASED_QUALITY = 4;
     public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr data);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
@@ -319,7 +458,6 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern void PostQuitMessage(int exit);
-    [DllImport("user32.dll")] public static extern bool KillTimer(IntPtr hwnd, UIntPtr id);
     [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
     [DllImport("gdi32.dll")] public static extern bool StretchBlt(IntPtr target,int x,int y,int w,int h,IntPtr source,int sx,int sy,int sw,int sh,uint op);
     [DllImport("gdi32.dll")] public static extern bool PatBlt(IntPtr target,int x,int y,int w,int h,uint op);
@@ -327,9 +465,6 @@ internal static class Native
     [DllImport("ntdll.dll")] public static extern int RtlGetVersion(ref OSVERSION version);
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct OSVERSION { public int size, major, minor, build, platform; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=128)] public string service; }
-
-
-    public static uint Rgb(byte r, byte g, byte b) => (uint)(r | (g << 8) | (b << 16));   // COLORREF
 
     [UnmanagedFunctionPointer(CallingConvention.Winapi)]
     public delegate IntPtr WndProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -384,6 +519,22 @@ internal static class Native
     [StructLayout(LayoutKind.Sequential)]
     public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
 
+    // UPDATELAYEREDWINDOWINFO: nur das geaenderte Rechteck wird uebertragen.
+    [StructLayout(LayoutKind.Sequential)]
+    public unsafe struct ULWINFO
+    {
+        public uint cbSize;
+        public IntPtr hdcDst;
+        public POINT* pptDst;
+        public SIZE* psize;
+        public IntPtr hdcSrc;
+        public POINT* pptSrc;
+        public uint crKey;
+        public BLENDFUNCTION* pblend;
+        public uint dwFlags;
+        public RECT* prcDirty;
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandleW(string name);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
@@ -402,26 +553,14 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rc);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT p);
     [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
-    [DllImport("user32.dll")]
-    public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr dst, ref POINT pos, ref SIZE size, IntPtr src, ref POINT srcPos, uint key, ref BLENDFUNCTION blend, uint flags);
-    [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+    [DllImport("user32.dll")] public static extern unsafe bool UpdateLayeredWindowIndirect(IntPtr hwnd, ULWINFO* info);
     [DllImport("user32.dll")] public static extern bool InvalidateRect(IntPtr hwnd, IntPtr rect, bool erase);
     [DllImport("user32.dll")] public static extern IntPtr BeginPaint(IntPtr hwnd, ref PAINTSTRUCT ps);
     [DllImport("user32.dll")] public static extern bool EndPaint(IntPtr hwnd, ref PAINTSTRUCT ps);
-    [DllImport("user32.dll")] public static extern IntPtr LoadCursorW(IntPtr inst, int id);
 
     [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr dc);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateDIBSection(IntPtr dc, ref BITMAPINFO bi, uint usage, out IntPtr bits, IntPtr section, uint offset);
     [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
     [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
-    [DllImport("gdi32.dll")] public static extern IntPtr CreateSolidBrush(uint color);
-    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr CreateFontW(int h, int w, int esc, int orient, int weight, uint italic, uint underline, uint strike, uint charset, uint outPrec, uint clipPrec, uint quality, uint pitch, string face);
-    [DllImport("gdi32.dll")] public static extern int SetBkMode(IntPtr dc, int mode);
-    [DllImport("gdi32.dll")] public static extern uint SetTextColor(IntPtr dc, uint color);
-    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] public static extern bool TextOutW(IntPtr dc, int x, int y, string s, int n);
-    [DllImport("gdi32.dll", CharSet = CharSet.Unicode)] public static extern bool GetTextExtentPoint32W(IntPtr dc, string s, int n, out SIZE size);
     [DllImport("gdi32.dll")] public static extern bool GdiFlush();
-    [DllImport("gdi32.dll")] public static extern bool BitBlt(IntPtr dst, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
 }
