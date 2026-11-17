@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
         <TargetFramework>net6.0</TargetFramework>
-        <Version>0.3.0.6</Version>
+        <Version>0.3.0.7</Version>
         <Description>Unknown's Smokescreen - stream protection for The Other Roles: while Streamer Mode is on, recording software sees Crewmate and no private team information.</Description>
         <Authors>DaUnknown-0</Authors>
         <LangVersion>latest</LangVersion>

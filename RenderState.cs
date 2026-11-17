@@ -18,6 +18,15 @@ internal static class RenderState
         public TextState(TMP_Text t) { Target = t; Value = t.text; Color = t.color; }
     }
     private static readonly Dictionary<IntPtr, TextState> texts = new();
+    private static readonly Dictionary<IntPtr, (Material material, bool gradient)> textStyles = new();
+    private static readonly Dictionary<IntPtr, Material> materialChoices = new();
+    private static readonly Dictionary<IntPtr, Material> neutralMaterials = new();
+    private static readonly int faceColor = Shader.PropertyToID("_FaceColor");
+    private static readonly Dictionary<IntPtr, Color32> roleVertices = new();
+    private static readonly int[] edgeColors =
+    {
+        Shader.PropertyToID("_OutlineColor"), Shader.PropertyToID("_UnderlayColor"), Shader.PropertyToID("_GlowColor")
+    };
     private static readonly List<(Material mat, int id, float value)> floats = new();
     private static readonly List<(Material mat, int id, Color value)> colors = new();
     private static readonly List<(GameObject go, bool active)> objects = new();
@@ -26,6 +35,75 @@ internal static class RenderState
     internal static void Text(TMP_Text t)
     {
         if (Alive(t) && !texts.ContainsKey(t.Pointer)) texts.Add(t.Pointer, new TextState(t));
+    }
+
+    internal static void PublicText(TMP_Text target, string value, Color color, bool ensureVertices = false)
+    {
+        Text(target);
+        if (target.text != value) target.text = value;
+        if (value.Length == 0) return;
+        color.a = target.color.a;
+        if (target.color != color) target.color = color;
+        if (ensureVertices) roleVertices[target.Pointer] = color;
+        var original = target.fontSharedMaterial;
+        var neutral = NeutralMaterial(original);
+        bool gradient = target.enableVertexGradient;
+        if (!gradient && neutral == original) return;
+        textStyles.TryAdd(target.Pointer, (original, gradient));
+        if (gradient) target.enableVertexGradient = false;
+        if (neutral != original) target.fontSharedMaterial = neutral;
+    }
+
+    private static Material NeutralMaterial(Material original)
+    {
+        if (!Alive(original)) return original;
+        if (materialChoices.TryGetValue(original.Pointer, out var ready)) return ready;
+        bool needsCopy = Tint(original, faceColor, 1f);
+        foreach (int property in edgeColors) needsCopy |= Tint(original, property, 0f);
+        if (!needsCopy)
+        {
+            materialChoices.Add(original.Pointer, original);
+            return original;
+        }
+        if (!neutralMaterials.TryGetValue(original.Pointer, out var copy))
+        {
+            copy = new Material(original) { name = "SmokescreenNeutralText", hideFlags = HideFlags.DontUnloadUnusedAsset };
+            neutralMaterials.Add(original.Pointer, copy);
+        }
+        else copy.CopyPropertiesFromMaterial(original);
+        Neutralize(copy, faceColor, 1f);
+        foreach (int property in edgeColors) Neutralize(copy, property, 0f);
+        materialChoices.Add(original.Pointer, copy);
+        return copy;
+    }
+
+    private static bool Tint(Material material, int property, float face)
+    {
+        if (!material.HasProperty(property)) return false;
+        var color = material.GetColor(property);
+        return face == 1f ? color.r != 1f || color.g != 1f || color.b != 1f
+            : color.r != color.g || color.g != color.b;
+    }
+
+    internal static bool HasTintedTextMaterial(Material material, Func<Color, bool> test)
+    {
+        if (!Alive(material)) return false;
+        if (material.HasProperty(faceColor) && test(material.GetColor(faceColor))) return true;
+        foreach (int property in edgeColors)
+            if (material.HasProperty(property) && test(material.GetColor(property))) return true;
+        return false;
+    }
+
+    private static void Neutralize(Material material, int property, float value)
+    {
+        if (Tint(material, property, value)) material.SetColor(property, new Color(value, value, value, material.GetColor(property).a));
+    }
+
+    internal static void ReleaseNeutralMaterials()
+    {
+        foreach (var material in neutralMaterials.Values) if (Alive(material)) UnityEngine.Object.Destroy(material);
+        neutralMaterials.Clear();
+        materialChoices.Clear();
     }
     // Renderer, deren Bild sich durch Material-, Sprite- oder Sichtbarkeitsaenderungen unterscheidet.
     internal static readonly List<Renderer> Owners = new();
@@ -62,18 +140,60 @@ internal static class RenderState
     {
         foreach (var t in texts.Values) if (Alive(t.Target) && Changed(t)) into.Add(t.Target);
     }
-    private static bool Changed(TextState t) => t.Target.text != t.Value || t.Target.color != t.Color;
+    private static bool Changed(TextState t) => textStyles.ContainsKey(t.Target.Pointer) || t.Target.text != t.Value || t.Target.color != t.Color;
     internal static void Flush()
     {
-        foreach (var t in texts.Values) if (Alive(t.Target) && Changed(t)) t.Target.ForceMeshUpdate(false, false);
+        foreach (var t in texts.Values)
+        {
+            if (!Alive(t.Target)) continue;
+            if (Changed(t)) t.Target.ForceMeshUpdate(false, false);
+            if (roleVertices.TryGetValue(t.Target.Pointer, out var color)) NormalizeVertices(t.Target, color);
+        }
     }
+
+    private static void NormalizeVertices(TMP_Text target, Color32 wanted)
+    {
+        var info = target.textInfo;
+        if (info == null || info.characterCount == 0) return;
+        var characters = info.characterInfo;
+        var meshes = info.meshInfo;
+        if (characters == null || meshes == null) return;
+        bool dirty = false;
+        for (int i = 0; i < Math.Min(characters.Length, info.characterCount); i++)
+        {
+            var character = characters[i];
+            if (!character.isVisible || character.materialReferenceIndex < 0 || character.materialReferenceIndex >= meshes.Length) continue;
+            var colors = meshes[character.materialReferenceIndex].colors32;
+            int vertex = character.vertexIndex;
+            if (colors == null || vertex < 0 || vertex + 3 >= colors.Length) continue;
+            for (int v = vertex; v < vertex + 4; v++)
+            {
+                var old = colors[v];
+                if (old.r == wanted.r && old.g == wanted.g && old.b == wanted.b) continue;
+                colors[v] = new Color32(wanted.r, wanted.g, wanted.b, old.a);
+                dirty = true;
+            }
+        }
+        if (dirty)
+        {
+            target.UpdateVertexData(TMP_VertexDataUpdateFlags.Colors32);
+            rewrittenVertices.Add(target.Pointer);
+        }
+    }
+
+    private static readonly HashSet<IntPtr> rewrittenVertices = new();
     internal static void Restore()
     {
         foreach (var t in texts.Values)
-            if (Alive(t.Target) && Changed(t))
+            if (Alive(t.Target) && (Changed(t) || rewrittenVertices.Contains(t.Target.Pointer)))
             {
                 if (t.Target.text != t.Value) t.Target.text = t.Value;
                 if (t.Target.color != t.Color) t.Target.color = t.Color;
+                if (textStyles.TryGetValue(t.Target.Pointer, out var style))
+                {
+                    t.Target.enableVertexGradient = style.gradient;
+                    if (t.Target.fontSharedMaterial != style.material) t.Target.fontSharedMaterial = style.material;
+                }
                 t.Target.ForceMeshUpdate(false, false);
             }
         for (int i = floats.Count - 1; i >= 0; i--) { var x = floats[i]; if (Alive(x.mat)) x.mat.SetFloat(x.id, x.value); }
@@ -81,7 +201,8 @@ internal static class RenderState
         foreach (var x in objects) if (Alive(x.go)) x.go.SetActive(x.active);
         foreach (var x in sprites) if (Alive(x.renderer)) { x.renderer.sprite = x.sprite; x.renderer.color = x.color; }
         foreach (var x in renderers) if (Alive(x.target)) x.target.enabled = x.enabled;
-        texts.Clear(); floats.Clear(); colors.Clear(); objects.Clear(); sprites.Clear(); renderers.Clear(); Owners.Clear();
+        texts.Clear(); textStyles.Clear(); materialChoices.Clear(); roleVertices.Clear(); rewrittenVertices.Clear();
+        floats.Clear(); colors.Clear(); objects.Clear(); sprites.Clear(); renderers.Clear(); Owners.Clear();
     }
 }
 
@@ -208,10 +329,7 @@ internal static class IntroPrivacy
         foreach (var t in list)
         {
             if (!RenderState.Alive(t)) continue;
-            RenderState.Text(t);
-            string plain = StreamNames.Plain(t.text);
-            if (t.text != plain) t.text = plain;
-            if (t.color != Color.white) t.color = Color.white;
+            RenderState.PublicText(t, StreamNames.Plain(t.text), Color.white);
         }
     }
     internal static void Apply(IntroCutscene intro)

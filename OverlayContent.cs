@@ -661,6 +661,8 @@ internal static class OverlayContent
     }
     internal static void Dispose()
     {
+        Mask.RestoreAll();
+        RenderState.ReleaseNeutralMaterials();
         shutdown = true;
         releaseAfterFrame = false;
         CameraMaskScope.Restore();

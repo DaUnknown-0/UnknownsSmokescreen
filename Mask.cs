@@ -84,6 +84,7 @@ internal static class Mask
     public static void ResetRound()
     {
         RestoreAll();
+        RenderState.ReleaseNeutralMaterials();
         rendererCache.Clear();
         PrivateSet.Reset();
         Arrows.RemoveAll(a => a == null || !Alive(a.arrow));
@@ -150,7 +151,7 @@ internal static class Mask
             if (!Alive(p) || p.Data == null || p.cosmetics == null) continue;
             if (Alive(p.cosmetics.nameText)) CleanName(p.cosmetics.nameText, p.PlayerId);
             var info = InfoAbove(p);
-            if (info != null) SetText(info, InfoFor(p, local, dead, false));
+            if (info != null) RenderState.PublicText(info, InfoFor(p, local, dead, false), Color.white, true);
             ClearOutline(p);
         }
 
@@ -177,7 +178,6 @@ internal static class Mask
     private static bool hideWorldNames;
     private static void CleanName(TMP_Text t, byte playerId, bool inMeeting = false)
     {
-        RenderState.Text(t);
         loverSuffix ??= Helpers.cs(Lovers.color, " ♥");
         lawyerSuffix ??= Helpers.cs(Lawyer.color, " §");
         thiefSuffix ??= Helpers.cs(Thief.color, " $");
@@ -195,11 +195,7 @@ internal static class Mask
             else if (Is(Mafioso.mafioso, playerId)) s = s.Replace(" (M)", "");
             else if (Is(Janitor.janitor, playerId)) s = s.Replace(" (J)", "");
         }
-        t.text = StreamNames.For(playerId, s);
-
-        // Red impostor mates, Jackal/Sidekick, Spy for the impostors, the own role colour: all white.
-        Color c = t.color;
-        if (c.r != 1f || c.g != 1f || c.b != 1f) t.color = new Color(1f, 1f, 1f, c.a);
+        SetText(t, StreamNames.For(playerId, s));
     }
 
     private static bool Is(PlayerControl p, byte id) => Alive(p) && p.PlayerId == id;
@@ -235,11 +231,8 @@ internal static class Mask
         return Tor.GhostsSeeRoles ? CrewAppearance.Name : "";
     }
 
-    private static void SetText(TMP_Text t, string s)
-    {
-        RenderState.Text(t);
-        if (!string.Equals(t.text, s, StringComparison.Ordinal)) t.text = s;
-    }
+    private static void SetText(TMP_Text t, string s, Color? color = null) =>
+        RenderState.PublicText(t, s, color ?? Color.white);
 
     // --- task tab --------------------------------------------------------------------------------------
 
@@ -277,7 +270,7 @@ internal static class Mask
                 if (info != null)
                 {
                     var p = Helpers.playerById(area.TargetPlayerId);
-                    SetText(info, results || p == null ? "" : InfoFor(p, local, dead, true));
+                    RenderState.PublicText(info, results || p == null ? "" : InfoFor(p, local, dead, true), Color.white, true);
                 }
             }
 
@@ -386,6 +379,7 @@ internal static class Mask
     /// <summary>The running intro. IntroCutscene.Instance stays null online for the whole intro (seen 2026-10-16
     /// in the real draft), so the intro patches hand the instance over themselves.</summary>
     internal static IntroCutscene Intro;
+    internal static IntPtr PublicIntroCount => Alive(Intro) && Alive(Intro.ImpostorText) ? Intro.ImpostorText.Pointer : IntPtr.Zero;
 
     private static void MaskIntro()
     {
@@ -402,7 +396,7 @@ internal static class Mask
         RenderState.Text(intro.RoleText);
         RenderState.Text(intro.RoleBlurbText);
         IntroPrivacy.Apply(intro);
-        if (Alive(intro.TeamTitle)) { SetText(intro.TeamTitle, title); intro.TeamTitle.color = team; }
+        if (Alive(intro.TeamTitle)) SetText(intro.TeamTitle, title, team);
         // "There is 1 Impostor among us": the crewmate intro has it, the impostor intro does not. Everybody gets it.
         if (Alive(intro.ImpostorText))
         {
@@ -411,9 +405,9 @@ internal static class Mask
             if (intro.ImpostorText.gameObject.activeSelf) SetText(intro.ImpostorText, ImpostorLine());
         }
         if (Alive(intro.BackgroundBar) && Alive(intro.BackgroundBar.material)) RenderState.Color(intro.BackgroundBar.material, Shader.PropertyToID("_Color"), team, intro.BackgroundBar);
-        if (Alive(intro.YouAreText)) intro.YouAreText.color = team;
-        if (Alive(intro.RoleText)) { SetText(intro.RoleText, CrewAppearance.Name); intro.RoleText.color = team; }
-        if (Alive(intro.RoleBlurbText)) { SetText(intro.RoleBlurbText, CrewAppearance.Description); intro.RoleBlurbText.color = team; }
+        if (Alive(intro.YouAreText)) SetText(intro.YouAreText, StreamNames.Plain(intro.YouAreText.text), team);
+        if (Alive(intro.RoleText)) SetText(intro.RoleText, CrewAppearance.Name, team);
+        if (Alive(intro.RoleBlurbText)) SetText(intro.RoleBlurbText, CrewAppearance.Description, team);
     }
 
     private static string impostorLine;
@@ -432,11 +426,11 @@ internal static class Mask
                 ? tc.GetString(StringNames.NumImpostorsS, new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(0))
                 : tc.GetString(StringNames.NumImpostorsP, new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(0));
             if (s.Contains("{0}")) s = s.Replace("{0}", n.ToString());
-            s = s.Replace("[FF1919FF]", "<color=#FF1919FF>").Replace("[]", "</color>");
+            s = StreamNames.Plain(s).Replace("[FF1919FF]", "").Replace("[]", "");
         }
         catch
         {
-            s = n == 1 ? "There is <color=#FF1919FF>1 Impostor</color> among us" : $"There are <color=#FF1919FF>{n} Impostors</color> among us";
+            s = n == 1 ? "There is 1 Impostor among us" : $"There are {n} Impostors among us";
         }
         impostorLine = s;
         return s;

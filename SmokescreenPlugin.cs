@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.6";
+    public const string Version = "0.3.0.7";
 
     internal static ManualLogSource Logger;
 
@@ -319,6 +319,7 @@ internal static class SmokescreenVersionLine
     public static void Postfix(PingTracker __instance)
     {
         if (ReferenceEquals(__instance, null) || ReferenceEquals(__instance.text, null) || __instance.text.m_CachedPtr == IntPtr.Zero) return;
+        LeakGuard.ObservePing(__instance.text);
         string text = __instance.text.text;
         if (string.IsNullOrEmpty(text)) return;
 

@@ -36,11 +36,12 @@ internal static class TaskListMask
                 string line = sb.ToString();
                 if (!string.IsNullOrEmpty(line)) str = str.Replace(line, "");
             }
-            str = CrewAppearance.TaskLine + "\n" + str.TrimStart('\r', '\n');
+            str = CrewAppearance.TaskLine + "\n" + StreamNames.Plain(str).TrimStart('\r', '\n');
         }
         catch (Exception e)
         {
             SmokescreenPlugin.Logger.LogWarning($"task list: {e.Message}");
+            str = CrewAppearance.TaskLine;
         }
         result = str;
         return str;
