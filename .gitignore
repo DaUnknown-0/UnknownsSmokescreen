@@ -1,0 +1,20 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio / Rider
+.vs/
+.idea/
+*.user
+*.suo
+
+# NuGet
+*.nupkg
+packages/
+
+# Misc
+*.log
+
+# Lobby-Passwort (niemals committen)
+.env
+set_password.ps1
