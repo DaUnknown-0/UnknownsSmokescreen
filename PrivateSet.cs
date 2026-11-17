@@ -134,9 +134,9 @@ internal static class PrivateSet
         players.Clear();
         foreach (var p in PlayerControl.AllPlayerControls)
             if (Alive(p)) players.Add(p.transform.Pointer);
-        Mask.Apply(); RenderState.Flush();
         try
         {
+            Mask.Apply(); RenderState.Flush();
             foreach (var r in Mask.Hidden) Add(r, main, ui, width, height, false);
             texts.Clear(); RenderState.ChangedTexts(texts);
             foreach (var t in texts)
@@ -394,6 +394,7 @@ internal static class PrivateSet
     // Ankerlagen am Frameende, Pixel von oben links. Geschwindigkeit fuer den Plattenradius.
     internal static void Track(AnchorPositions into, int height, float now)
     {
+        into.BlockWorld = OverlayContent.ActiveMinigame != IntPtr.Zero;
         into.Count = 0;
         foreach (var pair in Anchors)
         {

@@ -28,7 +28,11 @@ public class SmokescreenRunner : MonoBehaviour
         while (true)
         {
             yield return end;
-            try { OverlayContent.CompleteFrame(); }
+            try
+            {
+                CameraMaskScope.Complete();
+                OverlayContent.CompleteFrame();
+            }
             finally { CameraMaskScope.Restore(); }
         }
     }
@@ -37,7 +41,7 @@ public class SmokescreenRunner : MonoBehaviour
     private void FixedUpdate() => CameraMaskScope.Restore();
 
     private void OnApplicationQuit() { OverlayContent.Dispose(); OverlayHost.Stop(); }
-    private void OnDestroy() { OverlayContent.Dispose(); OverlayHost.Stop(); }
+    private void OnDestroy() { PrivacyNotice.Clear(); OverlayContent.Dispose(); OverlayHost.Stop(); }
 
     private void LateUpdate()
     {
@@ -52,6 +56,7 @@ public class SmokescreenRunner : MonoBehaviour
         {
             // Reversiblen Zustand fuer die neue Runde zuruecksetzen.
             Mask.ResetRound();
+            LeakGuard.Reset();
             Shield.ResultScreen = false;
             Shield.Invalidate();
             OverlayContent.Reset();
@@ -60,6 +65,8 @@ public class SmokescreenRunner : MonoBehaviour
 
         SettingsMenu.Tick();
         bool active = Shield.Active;
+        try { PrivacyNotice.Tick(active); }
+        catch (Exception) { PrivacyNotice.Clear(); }
         OverlayContent.Tick(active);
 
     }
@@ -113,6 +120,12 @@ internal static class Mask
         foreach (var r in entry.list) HideRenderer(r);
     }
 
+    internal static void HideLiveTree(GameObject go)
+    {
+        if (!Alive(go) || !go.activeInHierarchy) return;
+        foreach (var r in go.GetComponentsInChildren<Renderer>()) HideRenderer(r);
+    }
+
     public static void RestoreAll()
     {
         RenderState.Restore();
@@ -141,7 +154,11 @@ internal static class Mask
             ClearOutline(p);
         }
 
-        if (Alive(meeting)) MaskMeeting(meeting, local, dead);
+        if (Alive(meeting))
+        {
+            PrivateUi.ShowPublicVotes(meeting);
+            MaskMeeting(meeting, local, dead);
+        }
         MaskTaskTab();
         EventVisuals.Apply();
         if (SmokescreenPlugin.HideButtons.Value) HideButtons(dead);
@@ -150,6 +167,7 @@ internal static class Mask
         CollectionVisuals.Apply();
         MaskSabotageMap();
         MaskIntro();
+        PrivateUi.Apply();
     }
 
     // --- names ----------------------------------------------------------------------------------------
@@ -263,7 +281,7 @@ internal static class Mask
                 }
             }
 
-            if (!SmokescreenPlugin.HideButtons.Value) continue;
+            if (!SmokescreenPlugin.PrivateMeetings.Value) continue;
             // Guesser "ShootButton" and the Swapper check boxes (clones of the CancelButton) sit directly on
             // the vote area; the real CancelButton lives under area.Buttons and stays visible.
             var tr = area.transform;
@@ -276,7 +294,7 @@ internal static class Mask
             }
         }
 
-        if (!SmokescreenPlugin.HideButtons.Value) return;
+        if (!SmokescreenPlugin.PrivateMeetings.Value) return;
         // The Swapper "Confirm Swap" / Mayor "Double Vote" button: a nameless holder under PhoneUI with a
         // "votePlayerBase(Clone)" in it.
         if (!Alive(phoneUi)) phoneUi = FindDeep(meeting.transform, "PhoneUI");

@@ -16,6 +16,10 @@ Klickflächen und Fähigkeitshotkeys bleiben unverändert. **F8** blendet das pr
 
 Im öffentlichen Intro erscheinen Crewmate, die Crew-Farbe und Crew-Beschreibung, der Crew-Sound und eine neutrale Crew-Aufstellung. Das private Bild behält die echte Aufstellung und die echte Rolle. Der Endscreen zeigt den echten Siegertext, die echten Farben und die unveränderte TOR-Rollenübersicht auch der Kamera. Der zusätzliche Smokescreen-Rückblick entfällt.
 
+In geschützten Classic- und Guesser-Runden sehen du und die Zuschauer standardmäßig den Originalradius. Auf der Menüseite **Privatsphäre** kannst du **Sicht: Crew** wählen. Dann sehen beide den Crew-Radius einschließlich Lichtausfall und Trickster. Die Rollenlogik und der optionale RecordingFeed behalten den Originalradius.
+
+Der Chat mit Knopf, Benachrichtigung, Eingabe und Verlauf ist standardmäßig privat. So sind Rollenmeldungen auch dann geschützt, wenn sie im regulären Meeting-Chat landen. Zuschauer sehen in diesem Modus auch den normalen Meeting-Chat nicht. Mit **Chat: Öffentlich** sind auch Rollenlogs und Teamchats für Zuschauer sichtbar. Die private Guesser-Auswahl, die Swapper-Bedienung und der Mayor-Schalter haben eine eigene Einstellung. Die Abstimmungszeilen bleiben für Zuschauer sichtbar, während der Streamer die Guesser-Auswahl bedient.
+
 ## Fenster und Aufnahmeschutz
 
 Das private Fenster ist klickdurchlässig und liegt exakt über dem Client-Bereich des eigenen Unity-Spielfensters. Es erscheint nur, wenn dieses im Vordergrund und nicht minimiert ist. Bei aktivem Schutz wechselt das Spiel in ein randloses Fenster in Desktopgröße. Beim Abschalten werden der vorherige Modus und die vorherige Spielauflösung wiederhergestellt, einschließlich eines zuvor exklusiven Vollbildmodus.
@@ -54,6 +58,10 @@ Datei: `BepInEx/config/com.daunknown.smokescreen.cfg`.
 
 Die früheren Optionen `ShuffleMode`, `ShuffleGhostInfo` und `ShowRoundRecap` entfallen und werden aus der Config entfernt. Die Datei `smokescreen_overlay_test.txt` wird vollständig ignoriert. Explizite Diagnoseargumente sind `--smokescreen-diagnostics` und `"--smokescreen-dump=C:\absoluter\Diagnoseordner"`. Bildexporte enthalten private Informationen und erfolgen nur mit explizitem Dump-Argument. Höchstens 48 Proben (echtes Bild, maskiertes Bild und das für genau diesen Frame komponierte Overlay) werden innerhalb von 180 Sekunden gespeichert. Im Diagnosemodus wird auch ohne Vordergrund aufgenommen und gemessen; das private Fenster bleibt dann verborgen.
 
+Die Menüseite **Privatsphäre** startet bei neuer Konfiguration mit **Sicht: Original**, **Chat: Privat** und **Rollentöne: Stumm**. Alle drei Einstellungen lassen sich im Spiel ändern. **Meeting privat** und **Leckwächter** sind standardmäßig eingeschaltet. Bekannte TOR-Fähigkeitstöne werden für die lokale Audioausgabe stummgeschaltet. Du hörst sie bei dieser Einstellung ebenfalls nicht. Öffentliche Bombentöne und Alarme bleiben erhalten. Der Leckwächter meldet verdächtige sichtbare Textstichproben im privaten HUD, beispielsweise Rollennamen oder Rollenfarben. Bestätigte Ausnahmen speichern eine Prüfsumme des exakten Texts. Der Wächter kann Treffer bei öffentlich erlaubten Texten melden und Lecks außerhalb der Stichprobe übersehen.
+
+Der Schutzstatus im Menü und privaten HUD berücksichtigt Maskenrender, Sichtschutz und Windows-Fenstersperre. Die Anzeige unterscheidet eine veraltete oder fehlende Ausgabe und ein absichtlich verborgenes HUD. Die tatsächlich verwendete OBS-Quelle bleibt separat zu prüfen.
+
 ## Technik und Grenzen
 
 Die Maskierung gilt einmal pro Frame vom ersten Kamerarender bis zum Frameende nach allen Bildschirmkameras. Ein Restore in Update und FixedUpdate sowie vor der TOR-Logik sichert ausgelassene Frameabschlüsse ab. Nur geänderte Texte erhalten erzwungene Meshupdates. Update, Physik und Rollenlogik behalten ihren echten Zustand. Der vorliegende Il2Cpp-Build stellt `AsyncGPUReadback` nicht bereit. Der Fallback nutzt `ReadPixels` und nichtgenerischen direkten Zugriff auf wiederverwendete Texturpuffer. Es gibt keine pixelweisen Il2Cpp-Zugriffe, generischen AOT-Aufrufe für den Readback oder neuen Pixelarrays pro Bild.
@@ -63,6 +71,8 @@ Renderziele und CPU-Texturen tragen `HideFlags.DontUnloadUnusedAsset` und werden
 Beim Ende der Maskierung bleibt das private Bild bis nach dem ersten unmaskierten Bildschirmrender erhalten. Bei einer Renderpause bleibt das letzte geschützte Bild stehen; Fokusverlust und fehlender Aufnahmeschutz blenden es weiterhin aus. Inhalte wie Cooldown-Zahlen aktualisieren sich mit der eingestellten Rate, ihre Lage mit jedem Spielframe. Namen und Beschriftungen, die an Spielern hängen, liegen immer auf einem dunklen Namensschild, dessen Rand beim Laufen um bis zu einen Frame Bewegung wächst; ein kleiner Restversatz zum Spielbild legt so keine öffentliche Schrift frei. Ein neu auftauchendes privates Element erscheint erst mit der nächsten Aufnahme; bis dahin sieht man kurz die öffentliche Fassung. Private Weltobjekte am Boden werden über darüberlaufende Spieler gezeichnet. Inhalte in Texturkameras (z. B. Überwachungsbilder) zeigen privat die öffentliche Fassung.
 
 Eigene Kamera-Nachbearbeitung, komplexe abhängige Texturkameras und UI mit `ScreenSpaceOverlay` können zusätzliche Integration benötigen. Neue Rollenobjekte anderer Modversionen sind nicht automatisch vollständig abgedeckt. Sichtbare Handlungen wie Töten, Verwandeln, Bewegung und öffentlich sichtbare Effekte bleiben mögliche Informationsquellen. Die öffentlich feste Rolle ändert die tatsächliche Spielrolle nicht.
+
+Solange ein Vanilla-Minigame offen ist, blendet das private HUD weltverankerte Inseln und die private Statuszeile aus. Unterstützte zusätzliche UI-Kameras mit getrennten Layern verdecken private Inseln entsprechend der Renderreihenfolge. Inhalte von abhängigen Texturkameras bleiben im privaten HUD in ihrer öffentlichen Fassung.
 
 ## Installation und Build
 

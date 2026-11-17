@@ -239,7 +239,7 @@ public sealed class CameraMaskScope : MonoBehaviour
 {
     public CameraMaskScope(IntPtr p) : base(p) { }
     private static int appliedFrame = -1;
-    internal static int LastMaskedFrame => appliedFrame;
+    internal static int LastMaskedFrame { get; private set; } = -1;
     private static bool entered;
     internal static long Applications, Restores;
     internal static double ApplyMilliseconds;
@@ -248,9 +248,29 @@ public sealed class CameraMaskScope : MonoBehaviour
         if (OverlayContent.Stopped || OverlayContent.Rendering || !Shield.Active || appliedFrame == Time.frameCount) return;
         appliedFrame = Time.frameCount;
         var start = System.Diagnostics.Stopwatch.GetTimestamp();
-        try { entered = true; Mask.Apply(); RenderState.Flush(); Applications++; }
-        catch (Exception e) { Restore(); SmokescreenPlugin.Logger.LogWarning("Render-Maske: " + e.Message); }
+        try
+        {
+            entered = true;
+            VisionMask.Apply();
+            Mask.Apply();
+            RenderState.Flush();
+            LastMaskedFrame = Time.frameCount;
+            Applications++;
+        }
+        catch (Exception e)
+        {
+            Protection.InvalidateMask();
+            Restore();
+            SmokescreenPlugin.Logger.LogWarning("Render-Maske: " + e.Message);
+        }
         finally { ApplyMilliseconds += (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; }
+    }
+    internal static void Complete()
+    {
+        if (!entered || LastMaskedFrame != Time.frameCount) return;
+        Protection.ConfirmMask();
+        try { LeakGuard.Check(); }
+        catch (Exception) { LeakGuard.Failed = true; }
     }
     internal static void RestoreBeforeLogic()
     {
@@ -260,7 +280,8 @@ public sealed class CameraMaskScope : MonoBehaviour
     {
         if (!entered) return;
         entered = false;
-        Mask.RestoreAll();
+        try { Mask.RestoreAll(); }
+        finally { VisionMask.Restore(); }
         Restores++;
     }
 }

@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.5";
+    public const string Version = "0.3.0.6";
 
     internal static ManualLogSource Logger;
 
@@ -41,10 +41,18 @@ public class SmokescreenPlugin : BasePlugin
     internal static ConfigEntry<int> OverlayFps;
     internal static ConfigEntry<int> SyncFrames;
     internal static ConfigEntry<bool> DiagnosticMode;
+    internal static ConfigEntry<bool> CrewVision, LeakWatch, PrivateChat, PrivateMeetings, NeutralAudio;
+    internal static ConfigEntry<string> LeakAllowlist;
 
     public override void Load()
     {
         Logger = Log;
+        CrewVision = Config.Bind("Mask", "CrewVision", false, "Crew-Sicht für Spielfenster und privates HUD. Der separate RecordingFeed behält den Originalradius.");
+        PrivateChat = Config.Bind("Mask", "PrivateChat", true, "Gesamten Chat mit Eingabe, Hinweisen und Knopf nur privat zeigen.");
+        PrivateMeetings = Config.Bind("Mask", "PrivateMeetings", true, "Guesser-Auswahl, Swapper und Mayor-Auswahl nur privat zeigen.");
+        NeutralAudio = Config.Bind("Audio", "NeutralRoleSounds", true, "Private TOR-Faehigkeitstoene lokal unterdruecken, auch fuer den Spieler.");
+        LeakWatch = Config.Bind("Diagnostics", "LeakWatch", true, "Maskierte sichtbare Texte begrenzt auf Rollennamen und Rollenfarben pruefen.");
+        LeakAllowlist = Config.Bind("Diagnostics", "LeakAllowlist", "", "SHA256-Prüfsummen exakt erlaubter Texte, getrennt mit |.");
 
         Enabled = Config.Bind("General", "Enabled", true, "Load the mod at all.");
         OnlyInStreamerMode = Config.Bind("General", "OnlyInStreamerMode", true,
@@ -90,14 +98,16 @@ public class SmokescreenPlugin : BasePlugin
         OverlayHost.Start(PrivateOverlay.Value, RecordingFeed.Value);
         // Class by class: one patch that does not fit this game or TOR version must not take the others down.
         var harmony = new Harmony(Guid);
-        int ok = 0, failed = 0;
+        int ok = 0, failed = 0, corePatched = 0;
         foreach (var type in typeof(SmokescreenPlugin).Assembly.GetTypes())
         {
             if (type.GetCustomAttributes(typeof(HarmonyPatch), false).Length == 0) continue;
             try
             {
-                harmony.CreateClassProcessor(type).Patch();
-                ok++;
+                var methods = harmony.CreateClassProcessor(type).Patch();
+                ok += methods?.Count ?? 0;
+                if (methods?.Count > 0 && (type == typeof(IntroStart)
+                    || type == typeof(IntroReset) || type == typeof(RestoreBeforeGameLogic))) corePatched++;
             }
             catch (Exception e)
             {
@@ -105,12 +115,14 @@ public class SmokescreenPlugin : BasePlugin
                 Logger.LogError($"patch {type.Name} failed: {e.Message}");
             }
         }
+        Protection.PatchesReady = corePatched == 3 && failed == 0;
         Logger.LogInfo($"{Name} v{Version} loaded ({ok} patches{(failed > 0 ? $", {failed} FAILED" : "")}).");
     }
 
     public override bool Unload()
     {
         new Harmony(Guid).UnpatchSelf();
+        PrivacyNotice.Clear();
         OverlayContent.Dispose();
         Mask.RestoreAll();
         OverlayHost.Stop();
@@ -236,6 +248,25 @@ internal static class Texts
         ["overlay.flash"] = ("flash", "Hinweis"),
         ["overlay.roles"] = ("Roles", "Rollen"),
         ["overlay.waiting"] = ("waiting for a protected round", "wartet auf eine geschützte Runde"),
+        ["menu.general"] = ("General", "Allgemein"),
+        ["menu.privacy"] = ("Privacy", "Privatsphäre"),
+        ["menu.page.hint"] = ("Switch settings page.", "Einstellungsseite wechseln."),
+        ["menu.vision.on"] = ("Vision: Crew", "Sicht: Crew"),
+        ["menu.vision.off"] = ("Vision: Original", "Sicht: Original"),
+        ["menu.leak"] = ("Leak watch", "Leckwächter"),
+        ["menu.chat.on"] = ("Chat: Private", "Chat: Privat"),
+        ["menu.chat.off"] = ("Chat: Public", "Chat: Öffentlich"),
+        ["menu.meeting"] = ("Private meetings", "Meeting privat"),
+        ["menu.audio.on"] = ("Role sounds: Muted", "Rollentöne: Stumm"),
+        ["menu.audio.off"] = ("Role sounds: Audible", "Rollentöne: Hörbar"),
+        ["menu.allow"] = ("Allow last flagged text", "Letzten Treffer erlauben"),
+        ["menu.allow.clear"] = ("Clear allowlist", "Ausnahmen löschen"),
+        ["menu.vision.hint"] = ("Crew hides your real vision range from viewers. You also see only the crew radius.", "Crew verbirgt deine Sichtweite vor Zuschauern. Auch du siehst nur den Crew-Radius."),
+        ["menu.leak.hint"] = ("Samples masked visible text for role words and colours. Reports privately.", "Prueft maskierte Texte begrenzt auf Rollenwoerter und Farben. Meldung privat."),
+        ["menu.chat.hint"] = ("Private hides even meeting chat from viewers. Public role logs and team chats can reveal roles.", "Privat verbirgt auch den Meeting-Chat vor Zuschauern. Öffentliche Rollenlogs und Teamchats können Rollen verraten."),
+        ["menu.meeting.hint"] = ("Guesser selection, Swapper and Mayor controls become private.", "Guesser-Auswahl, Swapper und Mayor-Bedienung werden privat."),
+        ["menu.audio.hint"] = ("Muting known TOR role sounds silences them for you too. Public alarms stay audible.", "Stumm schaltet bekannte TOR-Rollentöne auch für dich aus. Öffentliche Alarme bleiben hörbar."),
+        ["menu.allow.hint"] = ("Allow the last flagged text by hash, or clear the allowlist.", "Letzten Treffer per Prüfsumme erlauben oder Ausnahmen löschen."),
         ["menu.on"] = ("On", "An"),
         ["menu.off"] = ("Off", "Aus"),
         ["menu.enabled"] = ("Protection", "Schutz"),
@@ -292,7 +323,7 @@ internal static class SmokescreenVersionLine
         if (string.IsNullOrEmpty(text)) return;
 
         string line = $"<color=#B4BCC8>{SmokescreenPlugin.Name} v{SmokescreenPlugin.Version}</color>";
-        if (Shield.Wanted) line += $" <color=#7CD992>({Texts.T("hud.on")})</color>";
+        if (Shield.Wanted) line += " <color=#B4BCC8>(" + Protection.PublicStatus + ")</color>";
         UnknownsCollective.Contribute(SmokescreenPlugin.Guid, line);
         text = UnknownsCollective.Render(__instance.text, text);
         text = HudNotice.Append(text);

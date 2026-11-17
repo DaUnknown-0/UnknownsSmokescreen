@@ -18,10 +18,22 @@ internal static class OverlayContent
     private static Camera[] cameras = Array.Empty<Camera>();
     private static Camera[] observed = Array.Empty<Camera>();
     private static float[] depths = Array.Empty<float>();
+    private static int[] cameraMasks = Array.Empty<int>();
     private static IntPtr[] destinations = Array.Empty<IntPtr>();
     private static Il2CppReferenceArray<Camera> cameraBuffer;
     private static Camera mainCamera, uiCamera;
     private static int privateLayer = -1, occluders;
+    private static int screenLayers;
+    private static IntPtr minigameAtCapture;
+    internal static bool OnScreenLayer(int layer) => (screenLayers & (1 << layer)) != 0;
+    internal static IntPtr ActiveMinigame
+    {
+        get
+        {
+            var minigame = Minigame.Instance;
+            return RenderState.Alive(minigame) && minigame.gameObject.activeInHierarchy ? minigame.Pointer : IntPtr.Zero;
+        }
+    }
     // Zwei getrennte Renderziele: je Runde ueber Schwarz und ueber Weiss. Kein Teil-Viewport,
     // weil Unity unter D3D Viewports in RenderTextures gegenueber ReadPixels gespiegelt ablegt.
     private static readonly RenderTexture[] stage = new RenderTexture[2];
@@ -73,11 +85,16 @@ internal static class OverlayContent
         IntroPrivacy.Prepare(Mask.Intro);
         TeamColors.Refresh();
         DiscoverCameras();
+        try { VisionMask.Prepare(); }
+        catch (Exception) { VisionMask.Ready = false; }
+        var minigame = ActiveMinigame;
+        if (minigame != minigameAtCapture) next = 0;
         bool wantPrivate = OverlayHost.PrivateWanted, wantFeed = OverlayHost.FeedWanted;
         if ((!wantPrivate && !wantFeed) || Time.realtimeSinceStartup < next) return;
         // Die Lage folgt ohnehin jedem Frame. Unveraenderter Inhalt wird nur alle 250 ms neu aufgenommen.
         bool fullNow = RenderState.Alive(Mask.Intro) || RenderState.Alive(MeetingHud.Instance) || privateLayer < 0 || !RenderState.Alive(mainCamera);
-        bool islandsDue = !fullNow && wantPrivate && (Time.realtimeSinceStartup - lastIslandCapture >= 0.25f || PrivateSet.ContentChanged());
+        bool islandsDue = !fullNow && wantPrivate && (minigame != minigameAtCapture
+            || Time.realtimeSinceStartup - lastIslandCapture >= 0.25f || PrivateSet.ContentChanged());
         if (!fullNow && wantPrivate && !islandsDue) skippedCaptures++;
         if (!fullNow && !wantFeed && !islandsDue) return;
         next = Time.realtimeSinceStartup + 1f / SmokescreenPlugin.OverlayFps.Value;
@@ -90,16 +107,22 @@ internal static class OverlayContent
             Rendering = true;
             // Intro und Meeting verdecken die Welt: dort bleibt das echte Vollbild deckend.
             bool full = RenderState.Alive(Mask.Intro) || RenderState.Alive(MeetingHud.Instance) || privateLayer < 0 || !RenderState.Alive(mainCamera);
-            if (full || wantFeed)
+            if (wantFeed)
             {
                 RenderFull(0);
-                Read(fullCpu, 0, 0, 0, w, h, 0);
-                var pixels = fullCpu.GetWritableImageData(0);
-                if (pixels == IntPtr.Zero) throw new InvalidOperationException("CPU-Texturpuffer fehlt");
-                if (wantFeed) OverlayHost.PublishFeed(pixels, w, h);
-                if (full && wantPrivate) PublishFull(pixels, w, h);
+                OverlayHost.PublishFeed(ReadFull(w, h), w, h);
+            }
+            if (full && wantPrivate)
+            {
+                if (wantFeed && !VisionMask.Different) PublishFull(fullCpu.GetWritableImageData(0), w, h);
+                else
+                {
+                    RenderPrivateFull(0);
+                    PublishFull(ReadFull(w, h), w, h);
+                }
             }
             if (!full && islandsDue) CaptureIslands(w, h);
+            minigameAtCapture = minigame;
             if (diagnostic && PublishedFrames % 90 == 0) RequestProbe("hud");
             PublishedFrames++;
         }
@@ -127,12 +150,14 @@ internal static class OverlayContent
         setMs += (t1 - t0) * 1000.0 / Stopwatch.Frequency;
         int count = PrivateSet.Count;
         if (count == 0) { OverlayHost.PublishEmpty(w, h); return; }
-        EnsureAtlas(PrivateSet.AtlasWidth, PrivateSet.AtlasHeight);
+        int captureWidth = PrivateSet.AtlasWidth, captureHeight = PrivateSet.AtlasHeight;
+        EnsureAtlas(captureWidth, captureHeight);
+        bool gpu = PrepareBlit();
         PrivateSet.MoveLayers(privateLayer);
         try
         {
-            bool gpu = PrepareBlit();
             long a = Stopwatch.GetTimestamp();
+            VisionMask.Apply();
             Round(0, gpu);
             long b = Stopwatch.GetTimestamp();
             try
@@ -147,24 +172,43 @@ internal static class OverlayContent
             double f = 1000.0 / Stopwatch.Frequency;
             renderPassMs += (b - a + d - b) * f; readMs += (e - d) * f;
         }
-        finally { PrivateSet.RestoreLayers(); }
+        finally
+        {
+            try { PrivateSet.RestoreLayers(); }
+            finally { VisionMask.Restore(); }
+        }
         lastIslandCapture = Time.realtimeSinceStartup;
         PrivateSet.RememberContent();
         long copyStart = Stopwatch.GetTimestamp();
         var data = atlasCpu.GetWritableImageData(0);
         if (data == IntPtr.Zero) throw new InvalidOperationException("Atlaspuffer fehlt");
-        var set = OverlayHost.BeginCapture(w, h, PrivateSet.AtlasWidth, PrivateSet.AtlasHeight);
+        var set = OverlayHost.BeginCapture(w, h, captureWidth, captureHeight);
         if (set == null) return;
-        int rowBytes = PrivateSet.AtlasWidth * 4, sourceStride = atlasCpu.width * 4;
-        for (int y = 0; y < PrivateSet.AtlasHeight; y++)
+        int rowBytes = captureWidth * 4, sourceStride = atlasCpu.width * 4;
+        for (int y = 0; y < captureHeight; y++)
             System.Runtime.InteropServices.Marshal.Copy(data + y * sourceStride, set.Atlas, y * rowBytes, rowBytes);
         set.Stride = rowBytes;
         OverlayHost.EnsureIslands(set, count);
-        Array.Copy(PrivateSet.Islands, set.Islands, count); set.Count = count;
+        Array.Copy(PrivateSet.Islands, 0, set.Islands, 0, count);
+        set.Count = count;
         set.Ortho = mainCamera.orthographicSize;
         OverlayHost.CommitCapture(set);
         copyMs += (Stopwatch.GetTimestamp() - copyStart) * 1000.0 / Stopwatch.Frequency;
         islandFrames++;
+    }
+
+    private static void RenderPrivateFull(int slot)
+    {
+        try { VisionMask.Apply(); RenderFull(slot); }
+        finally { VisionMask.Restore(); }
+    }
+
+    private static IntPtr ReadFull(int w, int h)
+    {
+        Read(fullCpu, 0, 0, 0, w, h, 0);
+        var data = fullCpu.GetWritableImageData(0);
+        if (data == IntPtr.Zero) throw new InvalidOperationException("CPU-Texturpuffer fehlt");
+        return data;
     }
 
     private static void PublishFull(IntPtr pixels, int w, int h)
@@ -173,7 +217,7 @@ internal static class OverlayContent
         if (set == null) return;
         System.Runtime.InteropServices.Marshal.Copy(pixels, set.Atlas, 0, w * h * 4);
         set.Stride = w * 4;
-        set.Islands[0] = new IslandDesc { X = 0, Y = 0, W = w, H = h, Opaque = true };
+        set.Islands[0] = new IslandDesc { X = 0, Y = 0, W = w, H = h, Opaque = true, Hud = true };
         set.Count = 1;
         set.Ortho = RenderState.Alive(mainCamera) ? mainCamera.orthographicSize : 0;
         OverlayHost.CommitCapture(set);
@@ -216,7 +260,7 @@ internal static class OverlayContent
             // Der Zustand ist jetzt der des regulaeren, maskierten Frames.
             RenderFull(0); Read(probeCpu, 0, 0, 0, width, height, 0);
             CameraMaskScope.Restore();
-            RenderFull(1); Read(fullCpu, 0, 0, 1, width, height, 0);
+            RenderPrivateFull(1); Read(fullCpu, 0, 0, 1, width, height, 0);
             Directory.CreateDirectory(directory);
             string prefix = Path.Combine(directory, label + "_" + Time.frameCount);
             Dump(prefix + "_masked.bmp", probeCpu);
@@ -288,17 +332,20 @@ internal static class OverlayContent
         {
             var c = cameraBuffer[i];
             if (!RenderState.Alive(c) || !RenderState.Alive(observed[i]) || c.Pointer != observed[i].Pointer
-                || c.depth != depths[i] || Destination(c) != destinations[i]) changed = true;
+                || c.depth != depths[i] || c.cullingMask != cameraMasks[i] || Destination(c) != destinations[i]) changed = true;
         }
         if (!changed && RenderState.Alive(mainCamera)) return;
         observed = new Camera[count]; depths = new float[count]; destinations = new IntPtr[count];
+        cameraMasks = new int[count];
+        next = 0;
         var list = new System.Collections.Generic.List<Camera>(count);
         for (int i = 0; i < count; i++)
         {
             var c = cameraBuffer[i];
             observed[i] = c;
-            if (!RenderState.Alive(c) || c == copy) continue;
+            if (!RenderState.Alive(c) || c == copy || c == blitCamera) continue;
             depths[i] = c.depth; destinations[i] = Destination(c);
+            cameraMasks[i] = c.cullingMask;
             if (c.GetComponent<CameraMaskScope>() == null) c.gameObject.AddComponent<CameraMaskScope>();
             list.Add(c);
         }
@@ -328,14 +375,14 @@ internal static class OverlayContent
             bool child = c.transform.IsChildOf(mainCamera.transform);
             if (uiCamera == null || (child && !uiCamera.transform.IsChildOf(mainCamera.transform))) uiCamera = c;
         }
-        int used = 0;
-        foreach (var c in cameras) if (Destination(c) == IntPtr.Zero) used |= c.cullingMask;
+        screenLayers = 0;
+        foreach (var c in cameras) if (Destination(c) == IntPtr.Zero) screenLayers |= c.cullingMask;
         privateLayer = -1;
         int[] candidates = { 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 7, 6, 3 };
         blitLayer = -1;
         foreach (int layer in candidates)
         {
-            if ((used & (1 << layer)) != 0 || !string.IsNullOrEmpty(LayerMask.LayerToName(layer))) continue;
+            if (OnScreenLayer(layer) || !string.IsNullOrEmpty(LayerMask.LayerToName(layer))) continue;
             if (privateLayer < 0) privateLayer = layer;
             else { blitLayer = layer; break; }
         }
@@ -391,7 +438,7 @@ internal static class OverlayContent
         copy.CopyFrom(source); copy.enabled = false;
         copy.transform.SetPositionAndRotation(source.transform.position, source.transform.rotation);
         copy.targetTexture = stage[slot];
-        copy.rect = new Rect(0, 0, 1, 1);
+        copy.rect = source.rect;
         copy.ResetAspect();
     }
 
@@ -431,10 +478,14 @@ internal static class OverlayContent
             copy.clearFlags = CameraClearFlags.SolidColor;
             copy.backgroundColor = new Color(background.r, background.g, background.b, 0);
             copy.Render();
-            if (world && ui)
+            foreach (var c in cameras)
             {
-                Prepare(uiCamera, slot);
-                copy.clearFlags = CameraClearFlags.Depth;
+                if (c == mainCamera || !RenderState.Alive(c) || !c.enabled || !c.gameObject.activeInHierarchy
+                    || Destination(c) != IntPtr.Zero || c.depth <= mainCamera.depth) continue;
+                if (!world && (c == uiCamera || c.depth < uiCamera.depth)) continue;
+                // UI-Schichten in Kamerareihenfolge. Weitere Weltansichten bleiben aus dem Inselbild.
+                if (c != uiCamera && (c.cullingMask & mainCamera.cullingMask) != 0) continue;
+                Prepare(c, slot);
                 copy.Render();
             }
         }

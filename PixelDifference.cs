@@ -44,7 +44,7 @@ internal sealed class Island
     public long Key;
     public float AnchorX, AnchorY;
     public int PlatePixels, AlphaPixels, Seeds;
-    public bool Empty;
+    public bool Empty, Hud;
     public int DrawX, DrawY;
     public bool Drawn;
 }
@@ -64,6 +64,7 @@ internal static class IslandBuilder
         int w = d.W, h = d.H, n = checked(w * h), col = d.Column > 0 ? d.Column : d.W;
         if (into.Pixels.Length < n) into.Pixels = new uint[n];
         into.X = d.X; into.Y = screenHeight - d.Y - h; into.W = w; into.H = h;
+        into.Hud = d.Hud;
         into.Key = d.Key; into.AnchorX = d.AnchorX; into.AnchorY = d.AnchorY;
         into.PlatePixels = into.AlphaPixels = into.Seeds = 0; into.Drawn = false;
         var output = into.Pixels;
@@ -286,6 +287,7 @@ internal sealed class AnchorPositions
     internal readonly long[] Keys = new long[64];
     internal readonly float[] X = new float[64], Y = new float[64];
     internal int Count;
+    internal bool BlockWorld;
     internal float Ortho;
     internal int Frame, Delay;
     internal string Probe;
@@ -296,6 +298,7 @@ internal sealed class AnchorPositions
     }
     internal void CopyFrom(AnchorPositions o)
     {
+        BlockWorld = o.BlockWorld;
         Count = o.Count; Ortho = o.Ortho; Frame = o.Frame; Probe = o.Probe; Delay = o.Delay;
         Array.Copy(o.Keys, Keys, Count); Array.Copy(o.X, X, Count); Array.Copy(o.Y, Y, Count);
     }
@@ -321,22 +324,22 @@ internal sealed unsafe class Composer
     }
 
     // Neue Inselmenge. Das alte Bild wird in den betroffenen Rechtecken ersetzt.
-    internal bool Replace(Island[] next, int n, float ortho, AnchorPositions positions, out int x0, out int y0, out int x1, out int y1)
+    internal bool Replace(Island[] next, int n, float ortho, AnchorPositions positions, out int x0, out int y0, out int x1, out int y1, bool blockWorld = false)
     {
         x0 = y0 = int.MaxValue; x1 = y1 = int.MinValue; dirtyCount = 0;
         for (int i = 0; i < count; i++) if (islands[i].Drawn) Grow(islands[i].DrawX, islands[i].DrawY, islands[i].W, islands[i].H, ref x0, ref y0, ref x1, ref y1);
         if (islands.Length < n) islands = new Island[Math.Max(n, 16)];
         Array.Copy(next, islands, n); count = n; captureOrtho = ortho;
         for (int i = 0; i < count; i++) islands[i].Drawn = false;
-        Place(positions, ref x0, ref y0, ref x1, ref y1, true);
+        Place(positions, ref x0, ref y0, ref x1, ref y1, true, blockWorld);
         return Paint(ref x0, ref y0, ref x1, ref y1);
     }
 
     // Nur neue Ankerlagen.
-    internal bool Move(AnchorPositions positions, out int x0, out int y0, out int x1, out int y1)
+    internal bool Move(AnchorPositions positions, out int x0, out int y0, out int x1, out int y1, bool blockWorld = false)
     {
         x0 = y0 = int.MaxValue; x1 = y1 = int.MinValue; dirtyCount = 0;
-        Place(positions, ref x0, ref y0, ref x1, ref y1, false);
+        Place(positions, ref x0, ref y0, ref x1, ref y1, false, blockWorld);
         return Paint(ref x0, ref y0, ref x1, ref y1);
     }
 
@@ -346,14 +349,14 @@ internal sealed unsafe class Composer
         if (bits != null) new Span<uint>(bits, width * height).Clear();
     }
 
-    private void Place(AnchorPositions positions, ref int x0, ref int y0, ref int x1, ref int y1, bool all)
+    private void Place(AnchorPositions positions, ref int x0, ref int y0, ref int x1, ref int y1, bool all, bool blockWorld)
     {
         // Zoomwechsel (TOR-Zoom fuer Geister): weltverankerte Inseln bis zur naechsten Aufnahme ausblenden.
         bool scaled = positions != null && captureOrtho > 0 && Math.Abs(positions.Ortho - captureOrtho) > captureOrtho * 0.01f;
         for (int i = 0; i < count; i++)
         {
             var island = islands[i];
-            bool visible = !island.Empty;
+            bool visible = !island.Empty && (island.Hud || !blockWorld);
             int dx = 0, dy = 0;
             if (visible && island.Key != 0)
             {

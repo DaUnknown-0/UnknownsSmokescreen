@@ -37,6 +37,7 @@ internal static class SettingsMenu
     private static ConfigEntry<KeyCode> listening;
     private static int consumedFrame = -1;
     private static string hover;
+    private static bool advanced;
     internal static bool PatchedAtStartup = true;
 
     // In diesem Frame hat das Menue eine Taste verbraucht (Belegung oder Umschalten).
@@ -136,7 +137,11 @@ internal static class SettingsMenu
     // Klon des Vanilla-Optionsfensters: nur Hintergrund und Schliessen-Knopf bleiben, darauf eigene Knoepfe.
     private static void Build(OptionsMenuBehaviour menu)
     {
-        if (Alive(popup)) Object.Destroy(popup);
+        if (Alive(popup))
+        {
+            popup.SetActive(false);
+            Object.Destroy(popup);
+        }
         entries.Clear();
         popup = Object.Instantiate(menu.gameObject);
         popup.name = "SmokescreenSettings";
@@ -157,12 +162,37 @@ internal static class SettingsMenu
         title = Label("Title", new Vector3(0, 2.32f, -1), 3.2f, Color.white);
         title.text = "Unknown's Smokescreen";
         status = Label("Status", new Vector3(0, 1.82f, -1), 1.5f, new Color(0.85f, 0.85f, 0.85f));
+        status.enableWordWrapping = false;
+        status.fontSizeMin = 1f;
+        status.fontSizeMax = 1.5f;
+        status.enableAutoSizing = true;
         hint = Label("Hint", new Vector3(0, -2.42f, -1), 1.35f, new Color(0.85f, 0.85f, 0.85f));
         hint.rectTransform.sizeDelta = new Vector2(5.2f, 0.6f);
         hint.enableWordWrapping = true;
 
-        // Sechs Zeilen; Hoehe 0.52 bei Abstand 0.63.
-        float[] row = { 1.25f, 0.62f, -0.01f, -0.64f, -1.27f, -1.9f };
+        Button("Page", 0, -1.9f, 2.2f, () => T(advanced ? "menu.general" : "menu.privacy"), () => Neutral, "menu.page.hint", () =>
+        {
+            var currentMenu = FindMenu();
+            if (!Alive(currentMenu)) return;
+            advanced = !advanced;
+            hover = null;
+            Build(currentMenu);
+            Open();
+        });
+        if (advanced)
+        {
+            Choice(-1.17f, 1.25f, "vision", SmokescreenPlugin.CrewVision);
+            Toggle(1.17f, 1.25f, () => T("menu.leak"), SmokescreenPlugin.LeakWatch, "menu.leak.hint");
+            Choice(-1.17f, 0.62f, "chat", SmokescreenPlugin.PrivateChat);
+            Toggle(1.17f, 0.62f, () => T("menu.meeting"), SmokescreenPlugin.PrivateMeetings, "menu.meeting.hint");
+            Choice(-1.17f, -0.01f, "audio", SmokescreenPlugin.NeutralAudio);
+            Toggle(1.17f, -0.01f, () => T("menu.diagnostics"), SmokescreenPlugin.DiagnosticMode, "menu.diagnostics.hint");
+            Button("Allowlist", 0, -0.64f, 4.4f, () => T("menu.allow"), () => Neutral, "menu.allow.hint", LeakGuard.AllowLast);
+            Button("AllowClear", 0, -1.27f, 4.4f, () => T("menu.allow.clear"), () => Neutral, "menu.allow.hint", () => SmokescreenPlugin.LeakAllowlist.Value = "");
+        }
+        else
+        {
+        float[] row = { 1.25f, 0.62f, -0.01f, -0.64f, -1.27f };
         Toggle(-1.17f, row[0], () => T("menu.enabled"), SmokescreenPlugin.Enabled, "menu.enabled.hint");
         Toggle(1.17f, row[0], () => T("menu.streamer"), SmokescreenPlugin.OnlyInStreamerMode, "menu.streamer.hint");
         Toggle(-1.17f, row[1], () => T("menu.buttons"), SmokescreenPlugin.HideButtons, "menu.buttons.hint");
@@ -177,7 +207,7 @@ internal static class SettingsMenu
         Button("SyncMinus", 0.34f, row[4], 0.55f, () => "-", () => Neutral, "menu.sync.hint", () => Step(SmokescreenPlugin.SyncFrames, -1, 0, 4));
         Button("Sync", 1.17f, row[4], 1.05f, () => T("menu.sync") + " " + SmokescreenPlugin.SyncFrames.Value, () => Neutral, "menu.sync.hint", null);
         Button("SyncPlus", 2.0f, row[4], 0.55f, () => "+", () => Neutral, "menu.sync.hint", () => Step(SmokescreenPlugin.SyncFrames, 1, 0, 4));
-        Toggle(0f, row[5], () => T("menu.diagnostics"), SmokescreenPlugin.DiagnosticMode, "menu.diagnostics.hint");
+        }
         // Ueber anderen HUD-Elementen (z. B. Hilfe-Knoepfe anderer Mods) zeichnen.
         foreach (var r in popup.GetComponentsInChildren<Renderer>(true)) r.sortingOrder = Math.Max(r.sortingOrder, 0) + 2000;
         SmokescreenPlugin.Logger.LogInfo("Einstellungsmenue aufgebaut (" + entries.Count + " Elemente)");
@@ -205,8 +235,15 @@ internal static class SettingsMenu
 
     private static void Toggle(float x, float y, Func<string> label, ConfigEntry<bool> entry, string hintKey, Action changed = null, bool warning = false)
     {
-        Button(entry.Definition.Section == "Diagnostics" ? "Diagnostics" : entry.Definition.Key, x, y, 2.2f, () => label() + ": " + T(entry.Value ? "menu.on" : "menu.off"),
+        Button(entry.Definition.Key == "Enabled" && entry.Definition.Section == "Diagnostics" ? "Diagnostics" : entry.Definition.Key, x, y, 2.2f, () => label() + ": " + T(entry.Value ? "menu.on" : "menu.off"),
             () => entry.Value ? (warning ? Warn : On) : Off, hintKey, () => { entry.Value = !entry.Value; changed?.Invoke(); });
+    }
+
+    private static void Choice(float x, float y, string key, ConfigEntry<bool> entry)
+    {
+        string prefix = "menu." + key;
+        Button(entry.Definition.Key, x, y, 2.2f, () => T(prefix + (entry.Value ? ".on" : ".off")),
+            () => Neutral, prefix + ".hint", () => entry.Value = !entry.Value);
     }
 
     private static void KeyButton(float x, float y, string labelKey, ConfigEntry<KeyCode> entry)
@@ -331,13 +368,7 @@ internal static class SettingsMenu
     // Neutral: nur Schutzzustand und Fensterzustand, nie Rolle oder Team.
     private static string Status()
     {
-        string protection = !SmokescreenPlugin.Enabled.Value ? T("menu.status.off")
-            : !PatchedAtStartup ? T("menu.status.restart")
-            : !Shield.Wanted ? T("menu.status.streamer")
-            : Shield.Active ? T("menu.status.active") : T("menu.status.waiting");
-        string overlay = !SmokescreenPlugin.PrivateOverlay.Value ? T("menu.overlay.disabled")
-            : OverlayHost.ProtectionFailed ? T("menu.overlay.failed") : T("menu.overlay.ok");
-        return protection + "   " + overlay;
+        return Protection.Details;
     }
 
     private static string T(string key) => Texts.T(key);

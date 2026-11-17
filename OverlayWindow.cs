@@ -32,6 +32,10 @@ internal static class OverlayHost
     internal static bool GameForeground => game != IntPtr.Zero && Native.GetForegroundWindow() == game && !Native.IsIconic(game);
     // Aufnahme nur fuer ein verifiziert geschuetztes Fenster. Diagnose misst auch ohne Vordergrund, zeigt dann aber nichts.
     internal static bool PrivateWanted => wantPrivate && protectedWindow && show && (GameForeground || DiagnosticCapture);
+    internal static bool Verified => protectedWindow && !ProtectionFailed;
+    internal static long LastCapture => Interlocked.Read(ref lastCaptureAt);
+    internal static bool Shown => shown;
+    internal static bool HiddenByUser => !show;
     internal static bool FeedWanted => wantRecording && feedActive;
     internal static string DiagnosticDirectory => diagnosticDirectory != null && Environment.TickCount64 <= diagnosticDeadline ? diagnosticDirectory : null;
     internal static void SetVisible(bool value, bool record = false) { show = value; feedActive = record; }
@@ -39,6 +43,7 @@ internal static class OverlayHost
     internal static void Start(bool privateOverlay, bool recordingFeed)
     {
         if (thread != null || (!privateOverlay && !recordingFeed)) return;
+        ProtectionFailed = false;
         wantPrivate = privateOverlay; wantRecording = recordingFeed; running = true;
         // Eine alte Testdatei wird absichtlich nie ausgewertet.
         foreach (var arg in NativeArguments.Values)
@@ -193,7 +198,8 @@ internal static class OverlayHost
     private static byte[] claimed;
     private static byte[] truth;
     private static int presentedWidth, presentedHeight, presentedX = int.MinValue, presentedY = int.MinValue;
-    private static bool shown, hasContent, needFull = true;
+    private static volatile bool shown;
+    private static bool hasContent, needFull = true;
     private static long buildTicks, captures, captureTicks, moves, moveTicks, presents, platePixels, seeds, workerReportAt, lastCaptureAt;
 
     private static unsafe void ProcessCapture()
@@ -201,7 +207,11 @@ internal static class OverlayHost
         Interlocked.Exchange(ref postedCapture, 0);
         CaptureSet set; bool clear;
         lock (gate) { set = pending; pending = null; clear = clearRequested; clearRequested = false; }
-        if (clear) { composer.Clear(); hasContent = false; needFull = true; }
+        if (clear)
+        {
+            composer.Clear(); hasContent = false; needFull = true;
+            Interlocked.Exchange(ref lastCaptureAt, 0);
+        }
         if (set == null) return;
         try
         {
@@ -231,8 +241,9 @@ internal static class OverlayHost
                     }
             }
             buildTicks += Stopwatch.GetTimestamp() - start;
-            hasContent = true; lastCaptureAt = set.CapturedAt;
-            if (composer.Replace(pool, n, set.Ortho, Delayed(current.Delay), out int x0, out int y0, out int x1, out int y1)) Present(x0, y0, x1, y1);
+            hasContent = true;
+            Interlocked.Exchange(ref lastCaptureAt, set.CapturedAt);
+            if (composer.Replace(pool, n, set.Ortho, Delayed(current.Delay), out int x0, out int y0, out int x1, out int y1, current.BlockWorld)) Present(x0, y0, x1, y1);
             captures++; captureTicks += Stopwatch.GetTimestamp() - start;
             Report();
         }
@@ -251,11 +262,11 @@ internal static class OverlayHost
         {
             // Diagnose vergleicht mit dem echten Bild genau dieses Frames: dafuer ohne Verzoegerung komponieren.
             // Das dabei geaenderte Rechteck (alte dargestellte Lage) muss mit dargestellt werden, sonst bleibt sie stehen.
-            probed = composer.Move(current, out px0, out py0, out px1, out py1);
+            probed = composer.Move(current, out px0, out py0, out px1, out py1, current.BlockWorld);
             try { DumpProbe(current.Probe, current.Frame); }
             catch (Exception e) { diagnosticDirectory = null; SmokescreenPlugin.Logger.LogWarning("HUD-Diagnose: " + e.Message); }
         }
-        bool moved = composer.Move(display, out int x0, out int y0, out int x1, out int y1);
+        bool moved = composer.Move(display, out int x0, out int y0, out int x1, out int y1, current.BlockWorld);
         if (probed)
         {
             if (!moved) { x0 = px0; y0 = py0; x1 = px1; y1 = py1; }
