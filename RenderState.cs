@@ -230,6 +230,7 @@ public sealed class CameraMaskScope : MonoBehaviour
 {
     public CameraMaskScope(IntPtr p) : base(p) { }
     private static int appliedFrame = -1;
+    internal static int LastMaskedFrame => appliedFrame;
     private static bool entered;
     internal static long Applications, Restores;
     internal static double ApplyMilliseconds;

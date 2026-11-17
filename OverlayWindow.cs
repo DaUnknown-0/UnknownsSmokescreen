@@ -1,10 +1,10 @@
 // Copyright (C) 2026 DaUnknown-0. GPL-3.0-or-later.
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
-using UnityEngine;
 
 namespace UnknownsSmokescreen;
 
@@ -28,7 +28,11 @@ internal static class OverlayHost
     private static bool shown;
     private static string diagnosticDirectory;
     private static int dumpCount;
+    private static string diagnosticRequest;
     private static long diagnosticDeadline;
+    private static OpaqueTiles tiles;
+    private static int tileEpoch = -1;
+    private static long workerFrames, workerTicks, workerReportAt;
     internal static IntPtr GameWindow => game;
     internal static bool GameForeground => game != IntPtr.Zero && Native.GetForegroundWindow() == game && !Native.IsIconic(game);
     internal static bool CanRender => (wantRecording && feedActive) || (GameForeground && protectedWindow && wantPrivate && show);
@@ -61,6 +65,7 @@ internal static class OverlayHost
         internal readonly int Width, Height;
         internal long CapturedAt;
         internal int Epoch;
+        internal bool CoverAll;
         internal FramePair(int w, int h)
         {
             Width = w; Height = h;
@@ -79,7 +84,7 @@ internal static class OverlayHost
             publishedAt = 0;
         }
     }
-    internal static void Publish(IntPtr real, IntPtr masked, int w, int h)
+    internal static void Publish(IntPtr real, IntPtr masked, int w, int h, bool coverAll = false)
     {
         FramePair frame;
         lock (gate)
@@ -100,6 +105,7 @@ internal static class OverlayHost
         Marshal.Copy(real, frame.Real, 0, frame.Real.Length);
         Marshal.Copy(masked, frame.Masked, 0, frame.Masked.Length);
         frame.CapturedAt = Environment.TickCount64;
+        frame.CoverAll = coverAll;
         lock (gate) { if (pending != null) available = pending; pending = frame; }
     }
     private static unsafe void ProcessPending()
@@ -107,6 +113,8 @@ internal static class OverlayHost
         FramePair frame;
         lock (gate) { frame = pending; pending = null; }
         if (frame == null) return;
+        long start = Stopwatch.GetTimestamp();
+        if (tileEpoch != frame.Epoch) { tiles = new OpaqueTiles(); tileEpoch = frame.Epoch; }
         int length = frame.Real.Length;
         if (pixels == null || pixels.Length != length)
         {
@@ -116,7 +124,19 @@ internal static class OverlayHost
         fixed (byte* m = frame.Masked)
         fixed (byte* output = pixels)
         fixed (byte* feed = truth)
-            PixelDifference.Copy(r, m, output, feed, frame.Width, frame.Height);
+            tiles.Copy(r, m, output, feed, frame.Width, frame.Height, frame.CapturedAt, frame.CoverAll);
+        workerFrames++; workerTicks += Stopwatch.GetTimestamp() - start;
+        if (Environment.TickCount64 >= workerReportAt)
+        {
+            SmokescreenPlugin.Logger.LogInfo($"HUD-Fenster: Ausgaben={workerFrames}, Vergleich/Kacheln={workerTicks * 1000.0 / Stopwatch.Frequency / workerFrames:F3} ms, Kacheln={tiles.CoveredTiles}, Rand={tiles.MarginTiles}, Voll={tiles.FullCoverage}");
+            workerReportAt = Environment.TickCount64 + 15000; workerFrames = workerTicks = 0;
+        }
+        try { DumpPair(frame); }
+        catch (Exception e)
+        {
+            diagnosticDirectory = null;
+            SmokescreenPlugin.Logger.LogWarning("HUD-Diagnose: " + e.Message);
+        }
         lock (gate)
         {
             if (frame.Epoch != epoch) return;
@@ -125,23 +145,27 @@ internal static class OverlayHost
         }
     }
     internal static void EndDiagnostic() { diagnosticDirectory = null; }
-    internal static void DumpDiagnostic(Texture2D real, Texture2D masked)
+    internal static void RequestDiagnostic(string label)
     {
-        if (diagnosticDirectory == null || Environment.TickCount64 > diagnosticDeadline || dumpCount >= 12) return;
-        Directory.CreateDirectory(diagnosticDirectory);
-        string prefix = Path.Combine(diagnosticDirectory, $"hud_{pid}_{++dumpCount:00}");
-        var r=real.GetWritableImageData(0); var m=masked.GetWritableImageData(0);
-        lock(gate)
-        {
-            SaveRaw(prefix+"_real.bmp", r, real.width,real.height);
-            SaveRaw(prefix+"_masked.bmp", m, real.width,real.height);
-        }
+        if (diagnosticDirectory != null) Interlocked.Exchange(ref diagnosticRequest, Path.GetFileName(label));
     }
-    private static unsafe void SaveRaw(string path, IntPtr raw, int w, int h)
+    private static unsafe void DumpPair(FramePair frame)
     {
-        var data=new byte[w*h*4];
-        fixed(byte* dst=data) PixelDifference.Copy((byte*)raw,(byte*)raw,dst,dst,w,h);
-        BitmapFile.Write(path,data,w,h);
+        string label = Interlocked.Exchange(ref diagnosticRequest, null), directory = diagnosticDirectory;
+        if (label == null || directory == null || Environment.TickCount64 > diagnosticDeadline || dumpCount >= 32) return;
+        Directory.CreateDirectory(directory);
+        string prefix = Path.Combine(directory, $"{label}_{++dumpCount:00}_{frame.CapturedAt}");
+        BitmapFile.Write(prefix + "_overlay.bmp", pixels, frame.Width, frame.Height);
+        var data = new byte[frame.Real.Length];
+        fixed (byte* dst = data)
+        fixed (byte* r = frame.Real)
+        fixed (byte* m = frame.Masked)
+        {
+            PixelDifference.Copy(r, r, dst, dst, frame.Width, frame.Height);
+            BitmapFile.Write(prefix + "_real.bmp", data, frame.Width, frame.Height);
+            PixelDifference.Copy(m, m, dst, dst, frame.Width, frame.Height);
+            BitmapFile.Write(prefix + "_masked.bmp", data, frame.Width, frame.Height);
+        }
     }
     private static bool FindCandidate(IntPtr hwnd, IntPtr unused)
     {
@@ -221,7 +245,8 @@ internal static class OverlayHost
         if(game==IntPtr.Zero || !Native.IsWindow(game)) Native.EnumWindows(enumerate,IntPtr.Zero);
         bool safe=protectedWindow && Verify();
         if(protectedWindow && !safe) { protectedWindow=false; ProtectionFailed=true; }
-        bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && Environment.TickCount64-Interlocked.Read(ref publishedAt)<500;
+        // Kein Freilegen des Fake-Bilds bei kurzen Renderpausen. Freigabe am Frameende.
+        bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && Interlocked.Read(ref publishedAt)>0;
         if(!visible) { if(shown) Native.ShowWindow(priv,0); shown=false; }
         {
             if(pixels==null) return;

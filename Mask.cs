@@ -21,6 +21,7 @@ public class SmokescreenRunner : MonoBehaviour
 
     private bool wasStarted;
     private void Start() => StartCoroutine(AfterRendering().WrapToIl2Cpp());
+    [Il2CppInterop.Runtime.Attributes.HideFromIl2Cpp]
     private IEnumerator AfterRendering()
     {
         var end = new WaitForEndOfFrame();

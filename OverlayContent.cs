@@ -18,9 +18,7 @@ internal static class OverlayContent
     private static IntPtr[] destinations = Array.Empty<IntPtr>();
     private static Il2CppReferenceArray<Camera> cameraBuffer;
     private static RenderTexture real;
-    private static bool pending;
-    private static int captureFrame;
-    private static double captureMs;
+    private static bool releaseAfterFrame;
     private static Texture2D realCpu, maskedCpu;
     private static int width, height;
     private static float next, metricsAt;
@@ -32,7 +30,7 @@ internal static class OverlayContent
     private static float diagnosticEnd;
     internal static long PublishedFrames;
     internal static double LastFrameMilliseconds;
-    internal static void Reset() { next = 0; pending = false; }
+    internal static void Reset() { next = 0; }
 
     internal static void Tick(bool active)
     {
@@ -40,8 +38,10 @@ internal static class OverlayContent
         BorderlessMode.Tick(Shield.Wanted && SmokescreenPlugin.PrivateOverlay.Value);
         if (Input.GetKeyDown(SmokescreenPlugin.OverlayHotkey.Value) && OverlayHost.GameForeground)
             visible = !visible;
-        OverlayHost.SetVisible(active && visible, active);
-        if (!active) { pending = false; ReleaseImages(); OverlayHost.Discard(); return; }
+        // Das letzte private Bild erst nach dem ersten unmaskierten Bildschirm freigeben.
+        releaseAfterFrame = !active;
+        if (!active) return;
+        OverlayHost.SetVisible(visible, true);
         IntroPrivacy.Prepare(Mask.Intro);
         TeamColors.Refresh();
         DiscoverCameras();
@@ -51,56 +51,50 @@ internal static class OverlayContent
         try
         {
             int w = Screen.width, h = Screen.height;
-            // Ein GPU-Ziel und begrenzte, wiederverwendete CPU-Bildpaare.
+            // Beide Fassungen unmittelbar nacheinander, ohne Update oder Backbuffer-Lesen.
             if (w < 1 || h < 1 || (long)w * h > 3840L * 2160) return;
             Ensure(w, h);
             Rendering = true;
             Render(real);
             Read(real, realCpu);
-            // Das Vergleichsbild kommt vom regulaeren Bildschirmrender am Frameende.
-            // Dadurch wird kein zweiter Kamerastapel und keine zweite Maske gebraucht.
-            pending = true;
-            captureFrame = Time.frameCount;
-            captureMs = watch.Elapsed.TotalMilliseconds;
-        }
-        catch (Exception e) { Failed(e); }
-        finally { Rendering = false; }
-    }
-    internal static void CompleteFrame()
-    {
-        if (!pending) return;
-        pending = false;
-        if (shutdown || captureFrame != Time.frameCount || !Shield.Active
-            || Screen.width != width || Screen.height != height || !OverlayHost.CanRender) return;
-        var watch = Stopwatch.StartNew();
-        try
-        {
-            // WaitForEndOfFrame laeuft nach allen Bildschirmkameras. Keine Skalierung.
-            Read(null, maskedCpu);
+            try
+            {
+                Mask.Apply(); RenderState.Flush();
+                Render(real);
+                Read(real, maskedCpu);
+            }
+            finally { Mask.RestoreAll(); }
             var r = realCpu.GetWritableImageData(0);
             var m = maskedCpu.GetWritableImageData(0);
             if (r == IntPtr.Zero || m == IntPtr.Zero) throw new InvalidOperationException("CPU-Texturpuffer fehlt");
-            OverlayHost.Publish(r, m, width, height);
+            if (diagnostic && PublishedFrames % 90 == 0) OverlayHost.RequestDiagnostic("hud");
+            OverlayHost.Publish(r, m, width, height, RenderState.Alive(Mask.Intro) || RenderState.Alive(MeetingHud.Instance));
             PublishedFrames++;
-            if (diagnostic && PublishedFrames % 90 == 1)
-                OverlayHost.DumpDiagnostic(realCpu, maskedCpu);
         }
         catch (Exception e) { Failed(e); }
+        finally { Rendering = false; }
         watch.Stop();
-        LastFrameMilliseconds = captureMs + watch.Elapsed.TotalMilliseconds;
+        LastFrameMilliseconds = watch.Elapsed.TotalMilliseconds;
         renderMs += LastFrameMilliseconds; frames++;
         if (Time.realtimeSinceStartup > metricsAt)
         {
             using var process = Process.GetCurrentProcess();
-            SmokescreenPlugin.Logger.LogInfo($"HUD: {width}x{height}, Bilder={PublishedFrames}, Render/Kopie={renderMs / Math.Max(1, frames):F2} ms, Prozess={process.PrivateMemorySize64 / 1048576} MiB, Readback=ReadPixels, ExtraRender=1, Masken={CameraMaskScope.Applications}, Restore={CameraMaskScope.Restores}, ApplyGesamt={CameraMaskScope.ApplyMilliseconds:F2} ms");
+            SmokescreenPlugin.Logger.LogInfo($"HUD: {width}x{height}, Bilder={PublishedFrames}, Render/Kopie={renderMs / Math.Max(1, frames):F2} ms, Prozess={process.PrivateMemorySize64 / 1048576} MiB, Readback=ReadPixels, ExtraRender=2, Paar=Synchron, Masken={CameraMaskScope.Applications}, Restore={CameraMaskScope.Restores}, ApplyGesamt={CameraMaskScope.ApplyMilliseconds:F2} ms");
             renderMs = 0; frames = 0; metricsAt = Time.realtimeSinceStartup + 15;
         }
         if (diagnostic && Time.realtimeSinceStartup > diagnosticEnd) { diagnostic = false; OverlayHost.EndDiagnostic(); }
     }
+    internal static void CompleteFrame()
+    {
+        if (!releaseAfterFrame || Shield.Active || CameraMaskScope.LastMaskedFrame == Time.frameCount) return;
+        releaseAfterFrame = false;
+        OverlayHost.SetVisible(false);
+        OverlayHost.Discard();
+        ReleaseImages();
+    }
     private static void Failed(Exception e)
     {
-        pending = false;
-        OverlayHost.SetVisible(false);
+        // Bei einem Renderfehler bleibt das letzte geschuetzte Bild stehen.
         if (Time.realtimeSinceStartup >= metricsAt)
         {
             SmokescreenPlugin.Logger.LogWarning("HUD-Render: " + e);
@@ -207,7 +201,7 @@ internal static class OverlayContent
     internal static void Dispose()
     {
         shutdown = true;
-        pending = false;
+        releaseAfterFrame = false;
         CameraMaskScope.Restore();
         ReleaseImages();
         if (RenderState.Alive(copy)) UnityEngine.Object.Destroy(copy.gameObject);

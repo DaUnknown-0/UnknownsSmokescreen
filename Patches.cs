@@ -127,7 +127,6 @@ internal static class ResultScreen
         Shield.ResultScreen = true;
         Shield.Invalidate();
         OverlayContent.Reset();
-        OverlayHost.SetVisible(false);
     }
 }
 
