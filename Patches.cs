@@ -4,6 +4,8 @@
 // unless Shield.Active.
 
 using System;
+using System.Collections.Generic;
+using System.Reflection;
 using HarmonyLib;
 using TheOtherRoles;
 using TheOtherRoles.Objects;
@@ -57,7 +59,6 @@ internal static class FlashMask
     {
         if (Shield.Active && SmokescreenPlugin.HideFlashes.Value)
         {
-            RoundRecap.Flash(color, message);
             EventVisuals.FlashUntil = Mathf.Max(EventVisuals.FlashUntil, Time.time + duration);
         }
     }
@@ -73,13 +74,21 @@ internal static class ArrowRegistry
 // --- intro ------------------------------------------------------------------------------------------------
 
 // Die echte Intro-Logik bleibt privat erhalten; die Render-Maske verwendet immer Crew.
-[HarmonyPatch(typeof(IntroCutscene), nameof(IntroCutscene.BeginImpostor))]
-[HarmonyPatch(typeof(IntroCutscene), nameof(IntroCutscene.BeginCrewmate))]
+[HarmonyPatch]
 internal static class IntroStart
 {
+    // Mehrere HarmonyPatch-Methodenattribute werden zusammengefuehrt, nicht als Liste gepatcht.
+    public static IEnumerable<MethodBase> TargetMethods()
+    {
+        yield return AccessTools.Method(typeof(IntroCutscene), nameof(IntroCutscene.CoBegin));
+        yield return AccessTools.Method(typeof(IntroCutscene), nameof(IntroCutscene.ShowTeam));
+        yield return AccessTools.Method(typeof(IntroCutscene), nameof(IntroCutscene.BeginImpostor));
+        yield return AccessTools.Method(typeof(IntroCutscene), nameof(IntroCutscene.BeginCrewmate));
+    }
     public static void Prefix(IntroCutscene __instance)
     {
         Mask.Intro = __instance;
+        Shield.ResultScreen = false;
         Shield.Invalidate();
         if (!Shield.Active) return;
         Mask.SwapIntroSound();
@@ -89,7 +98,11 @@ internal static class IntroStart
 [HarmonyPatch(typeof(IntroCutscene), nameof(IntroCutscene.ShowRole))]
 internal static class IntroRoleStart
 {
-    public static void Prefix(IntroCutscene __instance) => Mask.Intro = __instance;
+    public static void Prefix(IntroCutscene __instance)
+    {
+        Mask.Intro = __instance;
+        IntroPrivacy.RolePhase = true;
+    }
 }
 
 [HarmonyPatch(typeof(IntroCutscene), nameof(IntroCutscene.OnDestroy))]
@@ -103,32 +116,44 @@ internal static class IntroEnd
     }
 }
 
-// --- recap hooks --------------------------------------------------------------------------------------------
-
-[HarmonyPatch(typeof(CustomButton), nameof(CustomButton.onClickEvent))]
-internal static class AbilityLog
+// Ergebnisbild gehoert unveraendert dem Spiel und TOR, auch bei einem Wechsel im Renderframe.
+[HarmonyPatch(typeof(EndGameManager), nameof(EndGameManager.SetEverythingUp))]
+internal static class ResultScreen
 {
-    public static void Prefix(CustomButton __instance)
+    [HarmonyPriority(Priority.First)]
+    public static void Prefix()
     {
-        try
-        {
-            if (__instance.Timer < 0f && __instance.HasButton() && __instance.CouldUse())
-                RoundRecap.Ability(__instance);
-        }
-        catch { }
+        CameraMaskScope.Restore();
+        Shield.ResultScreen = true;
+        Shield.Invalidate();
+        OverlayContent.Reset();
+        OverlayHost.SetVisible(false);
     }
 }
 
-[HarmonyPatch(typeof(MeetingHud), nameof(MeetingHud.Start))]
-internal static class MeetingLog
+[HarmonyPatch(typeof(IntroCutscene), nameof(IntroCutscene.CreatePlayer))]
+internal static class IntroPlayerCreated
 {
-    public static void Postfix() => RoundRecap.Meeting();
+    public static void Postfix(PoolablePlayer __result) => IntroPrivacy.Register(__result);
 }
 
-[HarmonyPatch(typeof(EndGameManager), nameof(EndGameManager.SetEverythingUp))]
-internal static class RecapScreen
+[HarmonyPatch(typeof(IntroCutscene), nameof(IntroCutscene.CoBegin))]
+internal static class IntroReset
 {
-    [HarmonyPriority(Priority.Last)]
-    public static void Prefix(EndGameManager __instance) => EndScreenMask.Begin(__instance);
-    public static void Postfix(EndGameManager __instance) { RoundRecap.Show(__instance); EndScreenMask.Refresh(); }
+    [HarmonyPriority(Priority.First)]
+    public static void Prefix() => IntroPrivacy.Reset();
+}
+
+// TOR fuehrt Rollenlogik in diesen Updates aus. Auch bei ausbleibendem Frameende
+// werden die echten Werte vor diesen Patches wiederhergestellt.
+[HarmonyPatch]
+internal static class RestoreBeforeGameLogic
+{
+    public static IEnumerable<MethodBase> TargetMethods()
+    {
+        yield return AccessTools.Method(typeof(HudManager), nameof(HudManager.Update));
+        yield return AccessTools.Method(typeof(PlayerControl), nameof(PlayerControl.FixedUpdate));
+    }
+    [HarmonyPriority(Priority.First)]
+    public static void Prefix() => CameraMaskScope.RestoreBeforeLogic();
 }

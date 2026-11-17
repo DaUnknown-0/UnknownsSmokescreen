@@ -5,6 +5,8 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections;
+using BepInEx.Unity.IL2CPP.Utils.Collections;
 using TheOtherRoles;
 using TheOtherRoles.Objects;
 using TMPro;
@@ -18,6 +20,20 @@ public class SmokescreenRunner : MonoBehaviour
     public SmokescreenRunner(IntPtr ptr) : base(ptr) { }
 
     private bool wasStarted;
+    private void Start() => StartCoroutine(AfterRendering().WrapToIl2Cpp());
+    private IEnumerator AfterRendering()
+    {
+        var end = new WaitForEndOfFrame();
+        while (true)
+        {
+            yield return end;
+            try { OverlayContent.CompleteFrame(); }
+            finally { CameraMaskScope.Restore(); }
+        }
+    }
+    // Sicherheitsnetz, falls Unity bei Minimieren keinen EndOfFrame ausfuehrt.
+    private void Update() => CameraMaskScope.Restore();
+    private void FixedUpdate() => CameraMaskScope.Restore();
 
     private void OnApplicationQuit() { OverlayContent.Dispose(); OverlayHost.Stop(); }
     private void OnDestroy() { OverlayContent.Dispose(); OverlayHost.Stop(); }
@@ -33,15 +49,15 @@ public class SmokescreenRunner : MonoBehaviour
         catch { }
         if (started && !wasStarted)
         {
-            // New round: new pool (the lobby may have changed its settings), new recap.
+            // Reversiblen Zustand fuer die neue Runde zuruecksetzen.
             Mask.ResetRound();
-            RoundRecap.BeginRound();
+            Shield.ResultScreen = false;
+            Shield.Invalidate();
             OverlayContent.Reset();
         }
         wasStarted = started;
 
         bool active = Shield.Active;
-        if (started) RoundRecap.Tick(active);
         OverlayContent.Tick(active);
 
     }
@@ -106,8 +122,8 @@ internal static class Mask
 
     public static void Apply()
     {
-        if (EndScreenMask.Active) { EndScreenMask.Apply(); return; }
         var local = PlayerControl.LocalPlayer;
+        if (!Alive(local) || local.Data == null) return;
         bool dead = local.Data.IsDead;
         hideWorldNames = Tor.HidePlayerNames;
         var meeting = MeetingHud.Instance;
@@ -205,15 +221,19 @@ internal static class Mask
 
     // --- task tab --------------------------------------------------------------------------------------
 
+    private static TMP_Text taskTab;
     private static void MaskTaskTab()
     {
         // TOR writes "Tasks (3/7)" for crewmates and "Tasks " for everyone else: that difference alone tells
         // the team. Everyone gets the plain word.
         var hud = HudManager.Instance;
         if (!Alive(hud) || !Alive(hud.TaskPanel) || !Alive(hud.TaskPanel.tab)) return;
-        var tab = hud.TaskPanel.tab.transform.FindChild("TabText_TMP");
-        var tmp = Alive(tab) ? tab.GetComponent<TMP_Text>() : null;
-        if (tmp != null) SetText(tmp, "Tasks");
+        if (!Alive(taskTab))
+        {
+            var tab = hud.TaskPanel.tab.transform.FindChild("TabText_TMP");
+            taskTab = Alive(tab) ? tab.GetComponent<TMP_Text>() : null;
+        }
+        if (Alive(taskTab)) SetText(taskTab, "Tasks");
         if (Alive(hud.TaskPanel.taskText))
             SetText(hud.TaskPanel.taskText, TaskListMask.Masked(hud.TaskPanel.taskText.text));
     }

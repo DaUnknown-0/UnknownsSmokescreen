@@ -53,16 +53,75 @@ internal static class OverlayHost
         if (hwnd != IntPtr.Zero) Native.PostMessageW(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero);
         thread?.Join(2000); thread = null;
     }
-    internal static unsafe void Publish(IntPtr real, IntPtr masked, int w, int h)
+    // Zwei rohe Bildpaare: Hauptthread kopiert, Fensterthread vergleicht.
+    // Unity-Zeiger verlassen Publish nie und bleiben nicht ueber einen Frame erhalten.
+    private sealed class FramePair
+    {
+        internal readonly byte[] Real, Masked;
+        internal readonly int Width, Height;
+        internal long CapturedAt;
+        internal int Epoch;
+        internal FramePair(int w, int h)
+        {
+            Width = w; Height = h;
+            Real = new byte[checked(w * h * 4)]; Masked = new byte[Real.Length];
+        }
+    }
+    private static FramePair available, pending, reserve;
+    private static int bufferWidth, bufferHeight, epoch;
+    internal static void Discard()
     {
         lock (gate)
         {
-            int length = checked(w*h*4);
-            if (pixels == null || pixels.Length != length) { pixels = new byte[length]; truth = wantRecording ? new byte[length] : null; }
-            fixed (byte* output = pixels)
-            fixed (byte* feed = truth)
-                PixelDifference.Copy((byte*)real, (byte*)masked, output, feed, w, h);
-            width=w; height=h; version++; publishedAt=Environment.TickCount64;
+            if (bufferWidth == 0) return;
+            epoch++; pending = available = reserve = null;
+            bufferWidth = bufferHeight = 0;
+            publishedAt = 0;
+        }
+    }
+    internal static void Publish(IntPtr real, IntPtr masked, int w, int h)
+    {
+        FramePair frame;
+        lock (gate)
+        {
+            if (bufferWidth != w || bufferHeight != h)
+            {
+                epoch++; available = new FramePair(w, h); pending = null; publishedAt = 0;
+                reserve = new FramePair(w, h);
+                bufferWidth = w; bufferHeight = h;
+            }
+            frame = available ?? reserve ?? pending;
+            if (frame == null) return;
+            if (ReferenceEquals(frame, available)) available = null;
+            else if (ReferenceEquals(frame, reserve)) reserve = null;
+            else pending = null;
+            frame.Epoch = epoch;
+        }
+        Marshal.Copy(real, frame.Real, 0, frame.Real.Length);
+        Marshal.Copy(masked, frame.Masked, 0, frame.Masked.Length);
+        frame.CapturedAt = Environment.TickCount64;
+        lock (gate) { if (pending != null) available = pending; pending = frame; }
+    }
+    private static unsafe void ProcessPending()
+    {
+        FramePair frame;
+        lock (gate) { frame = pending; pending = null; }
+        if (frame == null) return;
+        int length = frame.Real.Length;
+        if (pixels == null || pixels.Length != length)
+        {
+            pixels = new byte[length]; truth = wantRecording ? new byte[length] : null;
+        }
+        fixed (byte* r = frame.Real)
+        fixed (byte* m = frame.Masked)
+        fixed (byte* output = pixels)
+        fixed (byte* feed = truth)
+            PixelDifference.Copy(r, m, output, feed, frame.Width, frame.Height);
+        lock (gate)
+        {
+            if (frame.Epoch != epoch) return;
+            width = frame.Width; height = frame.Height; version++; publishedAt = frame.CapturedAt;
+            available = frame;
         }
     }
     internal static void EndDiagnostic() { diagnosticDirectory = null; }
@@ -74,9 +133,8 @@ internal static class OverlayHost
         var r=real.GetWritableImageData(0); var m=masked.GetWritableImageData(0);
         lock(gate)
         {
-            SaveRaw(prefix+"_real.bmp", r, width,height);
-            SaveRaw(prefix+"_masked.bmp", m, width,height);
-            BitmapFile.Write(prefix+"_overlay.bmp", pixels,width,height);
+            SaveRaw(prefix+"_real.bmp", r, real.width,real.height);
+            SaveRaw(prefix+"_masked.bmp", m, real.width,real.height);
         }
     }
     private static unsafe void SaveRaw(string path, IntPtr raw, int w, int h)
@@ -137,7 +195,7 @@ internal static class OverlayHost
             if(priv!=IntPtr.Zero) { Native.ShowWindow(priv,0); Native.DestroyWindow(priv); }
             if(rec!=IntPtr.Zero) Native.DestroyWindow(rec);
             surface?.Dispose(); recording?.Dispose(); priv=rec=IntPtr.Zero;
-            lock(gate) { pixels=truth=null; }
+            lock(gate) { pixels=truth=null; pending=available=reserve=null; }
         }
     }
     private static IntPtr WindowProc(IntPtr hwnd,uint msg,IntPtr w,IntPtr l)
@@ -159,12 +217,12 @@ internal static class OverlayHost
     }
     private static void Tick()
     {
+        ProcessPending();
         if(game==IntPtr.Zero || !Native.IsWindow(game)) Native.EnumWindows(enumerate,IntPtr.Zero);
         bool safe=protectedWindow && Verify();
         if(protectedWindow && !safe) { protectedWindow=false; ProtectionFailed=true; }
-        bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && Environment.TickCount64-publishedAt<500;
+        bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && Environment.TickCount64-Interlocked.Read(ref publishedAt)<500;
         if(!visible) { if(shown) Native.ShowWindow(priv,0); shown=false; }
-        lock(gate)
         {
             if(pixels==null) return;
             if(visible && Native.GetClientRect(game,out var rc))

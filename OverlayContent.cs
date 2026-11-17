@@ -1,9 +1,7 @@
 // Copyright (C) 2026 DaUnknown-0. GPL-3.0-or-later.
 using System;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using UnityEngine;
-using UnityEngine.Rendering;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 
 namespace UnknownsSmokescreen;
@@ -19,7 +17,10 @@ internal static class OverlayContent
     private static float[] depths = Array.Empty<float>();
     private static IntPtr[] destinations = Array.Empty<IntPtr>();
     private static Il2CppReferenceArray<Camera> cameraBuffer;
-    private static RenderTexture real, masked;
+    private static RenderTexture real;
+    private static bool pending;
+    private static int captureFrame;
+    private static double captureMs;
     private static Texture2D realCpu, maskedCpu;
     private static int width, height;
     private static float next, metricsAt;
@@ -31,19 +32,18 @@ internal static class OverlayContent
     private static float diagnosticEnd;
     internal static long PublishedFrames;
     internal static double LastFrameMilliseconds;
-    internal static void Reset() { next = 0; }
+    internal static void Reset() { next = 0; pending = false; }
 
-    internal static unsafe void Tick(bool active)
+    internal static void Tick(bool active)
     {
         if (shutdown) return;
         BorderlessMode.Tick(Shield.Wanted && SmokescreenPlugin.PrivateOverlay.Value);
         if (Input.GetKeyDown(SmokescreenPlugin.OverlayHotkey.Value) && OverlayHost.GameForeground)
             visible = !visible;
         OverlayHost.SetVisible(active && visible, active);
-        if (!active) { ReleaseImages(); return; }
+        if (!active) { pending = false; ReleaseImages(); OverlayHost.Discard(); return; }
         IntroPrivacy.Prepare(Mask.Intro);
-        EndScreenMask.Refresh();
-        if (!EndScreenMask.Active) TeamColors.Refresh();
+        TeamColors.Refresh();
         DiscoverCameras();
         if (!OverlayHost.CanRender || Time.realtimeSinceStartup < next) return;
         next = Time.realtimeSinceStartup + 1f / SmokescreenPlugin.OverlayFps.Value;
@@ -51,38 +51,61 @@ internal static class OverlayContent
         try
         {
             int w = Screen.width, h = Screen.height;
-            // Drei CPU-Puffer und zwei GPU-Ziele bleiben auf 32 Bit begrenzt.
+            // Ein GPU-Ziel und begrenzte, wiederverwendete CPU-Bildpaare.
             if (w < 1 || h < 1 || (long)w * h > 3840L * 2160) return;
             Ensure(w, h);
             Rendering = true;
             Render(real);
             Read(real, realCpu);
-            try { Mask.Apply(); RenderState.Flush(); Render(masked); Read(masked, maskedCpu); }
-            finally { Mask.RestoreAll(); }
+            // Das Vergleichsbild kommt vom regulaeren Bildschirmrender am Frameende.
+            // Dadurch wird kein zweiter Kamerastapel und keine zweite Maske gebraucht.
+            pending = true;
+            captureFrame = Time.frameCount;
+            captureMs = watch.Elapsed.TotalMilliseconds;
+        }
+        catch (Exception e) { Failed(e); }
+        finally { Rendering = false; }
+    }
+    internal static void CompleteFrame()
+    {
+        if (!pending) return;
+        pending = false;
+        if (shutdown || captureFrame != Time.frameCount || !Shield.Active
+            || Screen.width != width || Screen.height != height || !OverlayHost.CanRender) return;
+        var watch = Stopwatch.StartNew();
+        try
+        {
+            // WaitForEndOfFrame laeuft nach allen Bildschirmkameras. Keine Skalierung.
+            Read(null, maskedCpu);
             var r = realCpu.GetWritableImageData(0);
             var m = maskedCpu.GetWritableImageData(0);
             if (r == IntPtr.Zero || m == IntPtr.Zero) throw new InvalidOperationException("CPU-Texturpuffer fehlt");
-            OverlayHost.Publish(r, m, w, h);
+            OverlayHost.Publish(r, m, width, height);
             PublishedFrames++;
             if (diagnostic && PublishedFrames % 90 == 1)
                 OverlayHost.DumpDiagnostic(realCpu, maskedCpu);
         }
-        catch (Exception e)
-        {
-            OverlayHost.SetVisible(false);
-            if (Time.realtimeSinceStartup >= metricsAt) { SmokescreenPlugin.Logger.LogWarning("HUD-Render: " + e); metricsAt = Time.realtimeSinceStartup + 10; }
-        }
-        finally { Rendering = false; }
+        catch (Exception e) { Failed(e); }
         watch.Stop();
-        LastFrameMilliseconds = watch.Elapsed.TotalMilliseconds;
+        LastFrameMilliseconds = captureMs + watch.Elapsed.TotalMilliseconds;
         renderMs += LastFrameMilliseconds; frames++;
         if (Time.realtimeSinceStartup > metricsAt)
         {
             using var process = Process.GetCurrentProcess();
-            SmokescreenPlugin.Logger.LogInfo($"HUD: {width}x{height}, Bilder={PublishedFrames}, Render/Kopie={renderMs / Math.Max(1, frames):F2} ms, Prozess={process.PrivateMemorySize64 / 1048576} MiB, Readback=ReadPixels");
+            SmokescreenPlugin.Logger.LogInfo($"HUD: {width}x{height}, Bilder={PublishedFrames}, Render/Kopie={renderMs / Math.Max(1, frames):F2} ms, Prozess={process.PrivateMemorySize64 / 1048576} MiB, Readback=ReadPixels, ExtraRender=1, Masken={CameraMaskScope.Applications}, Restore={CameraMaskScope.Restores}, ApplyGesamt={CameraMaskScope.ApplyMilliseconds:F2} ms");
             renderMs = 0; frames = 0; metricsAt = Time.realtimeSinceStartup + 15;
         }
         if (diagnostic && Time.realtimeSinceStartup > diagnosticEnd) { diagnostic = false; OverlayHost.EndDiagnostic(); }
+    }
+    private static void Failed(Exception e)
+    {
+        pending = false;
+        OverlayHost.SetVisible(false);
+        if (Time.realtimeSinceStartup >= metricsAt)
+        {
+            SmokescreenPlugin.Logger.LogWarning("HUD-Render: " + e);
+            metricsAt = Time.realtimeSinceStartup + 10;
+        }
     }
     private static void DiscoverCameras()
     {
@@ -134,7 +157,7 @@ internal static class OverlayContent
             UnityEngine.Object.DontDestroyOnLoad(go);
             copy = go.AddComponent<Camera>(); copy.enabled = false;
         }
-        real = Target("SmokescreenReal", w, h); masked = Target("SmokescreenMasked", w, h);
+        real = Target("SmokescreenReal", w, h);
         realCpu = Cpu(w, h); maskedCpu = Cpu(w, h);
         if (!diagnosticInitialized)
         {
@@ -177,14 +200,15 @@ internal static class OverlayContent
     {
         if (RenderState.Alive(copy)) copy.targetTexture = null;
         if (RenderState.Alive(real)) { real.Release(); UnityEngine.Object.Destroy(real); }
-        if (RenderState.Alive(masked)) { masked.Release(); UnityEngine.Object.Destroy(masked); }
         if (RenderState.Alive(realCpu)) UnityEngine.Object.Destroy(realCpu);
         if (RenderState.Alive(maskedCpu)) UnityEngine.Object.Destroy(maskedCpu);
-        real = masked = null; realCpu = maskedCpu = null; width = height = 0;
+        real = null; realCpu = maskedCpu = null; width = height = 0;
     }
     internal static void Dispose()
     {
         shutdown = true;
+        pending = false;
+        CameraMaskScope.Restore();
         ReleaseImages();
         if (RenderState.Alive(copy)) UnityEngine.Object.Destroy(copy.gameObject);
         copy = null;

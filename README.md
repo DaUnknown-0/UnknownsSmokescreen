@@ -6,7 +6,7 @@ Diese Mod steht in keiner Verbindung zu Innersloth LLC. Among Us und zugehörige
 
 ## Kamera und privates HUD
 
-Die öffentliche Rollenanzeige bleibt fest auf Crewmate. Es gibt keine Rollenwürfelung, keinen Rollenpool, keinen Teamfilter und keinen zeitlichen Wechsel. Das gilt für den Text über dem Kopf, die Taskliste, Rolleninformationen als Geist, das Crew-Intro und den Rückblick. Rollenfarben und Rollenbeschreibungen anderer Teams werden dort nicht gezeigt. Alte Shuffle-Konfiguration wird beim Laden entfernt.
+Die öffentliche Rollenanzeige bleibt fest auf Crewmate. Es gibt keine Rollenwürfelung, keinen Rollenpool, keinen Teamfilter und keinen zeitlichen Wechsel. Das gilt für den Text über dem Kopf, die Taskliste, Rolleninformationen als Geist, das gesamte Intro ab CoBegin. Rollenfarben und Rollenbeschreibungen anderer Teams werden dort nicht gezeigt. Alte Shuffle-Konfiguration wird beim Laden entfernt.
 
 Die privaten Originale bleiben erhalten. Eine zweite Unity-Kamera rendert die vorhandenen Spielkameras mit echten Texturen, Texten, Cooldowns, Tastenhinweisen, Namensschildern, Pfeilen und unterstützten Rollenobjekten. Kameras mit RenderTexture-Ziel liefern dabei zuerst ihren jeweiligen echten oder maskierten Inhalt, bevor das Bildschirm-HUD gerendert wird. Neue aktive Kameras werden vor dem Render mit einem wiederverwendeten Kamerapuffer erfasst.
 
@@ -14,7 +14,7 @@ Aus echtem und maskiertem Bild entsteht ein Differenzbild: Nur abweichende Pixel
 
 Klickflächen und Fähigkeitshotkeys bleiben unverändert. **F8** blendet das private HUD aus oder wieder ein. Die öffentliche Maske und der ausdrücklich aktivierte RecordingFeed laufen weiter. Ausgeschaltete oder durch Verkleidung geänderte Namensschilder werden respektiert. Öffentliche Namen bleiben unabhängig von der eigenen Rolle weiß und ohne Teamzeichen. Das private Bild übernimmt die native Sichtbarkeit, Teamfarben und bekannten Beziehungen aus TOR und geladenen Erweiterungen. Vorhandene UC-Namensadapter werden per Reflection eingebunden.
 
-Im öffentlichen Intro erscheinen Crewmate, die Crew-Farbe und Crew-Beschreibung, der Crew-Sound und eine neutrale Crew-Aufstellung. Das private Bild behält die echte Aufstellung und die echte Rolle. Im öffentlichen Endbild werden Rollenübersicht und Rückblick als Crewmate dargestellt; die tatsächlichen Rollen, Teams und Ereignisse bleiben privat.
+Im öffentlichen Intro erscheinen Crewmate, die Crew-Farbe und Crew-Beschreibung, der Crew-Sound und eine neutrale Crew-Aufstellung. Das private Bild behält die echte Aufstellung und die echte Rolle. Der Endscreen zeigt den echten Siegertext, die echten Farben und die unveränderte TOR-Rollenübersicht auch der Kamera. Der zusätzliche Smokescreen-Rückblick entfällt.
 
 ## Fenster und Aufnahmeschutz
 
@@ -40,20 +40,19 @@ Datei: `BepInEx/config/com.daunknown.smokescreen.cfg`.
 | `General / OnlyInStreamerMode` | `true` | Nur bei aktiviertem Streamer-Modus schützen. |
 | `Mask / HideRoleButtons` | `true` | Rollenknöpfe öffentlich ausblenden. |
 | `Mask / HideRoleFlashes` | `true` | Rollenhinweise nur privat darstellen. |
-| `Recap / ShowRoundRecap` | `true` | Rückblick mit öffentlichem Crewmate und privaten echten Details. |
 | `Overlay / PrivateOverlay` | `true` | Privates echtes HUD anzeigen. |
 | `Overlay / ToggleKey` | `F8` | Privates Overlay einblenden und ausblenden. |
-| `Overlay / FramesPerSecond` | `30` | Zielbildrate von 5 bis 30. Die tatsächliche Rate hängt von GPU, Auflösung und Szene ab. |
+| `Overlay / FramesPerSecond` | `15` | Zielbildrate von 5 bis 30. Die tatsächliche Rate hängt von GPU, Auflösung und Szene ab. |
 | `Overlay / RecordingFeed` | `false` | Getrenntes aufnehmbares Wahrheitsfenster. |
 | `Diagnostics / Enabled` | `false` | Diagnose für maximal 180 Sekunden, ohne Lockerung von Fokus oder Aufnahmeschutz. |
 
-Die früheren Optionen `ShuffleMode` und `ShuffleGhostInfo` entfallen und werden aus der Config entfernt. Die Datei `smokescreen_overlay_test.txt` wird vollständig ignoriert. Explizite Diagnoseargumente sind `--smokescreen-diagnostics` und `"--smokescreen-dump=C:\absoluter\Diagnoseordner"`. Bildexporte enthalten private Informationen und erfolgen nur mit explizitem Dump-Argument. Höchstens zwölf Bildsätze werden innerhalb von 180 Sekunden gespeichert.
+Die früheren Optionen `ShuffleMode`, `ShuffleGhostInfo` und `ShowRoundRecap` entfallen und werden aus der Config entfernt. Die Datei `smokescreen_overlay_test.txt` wird vollständig ignoriert. Explizite Diagnoseargumente sind `--smokescreen-diagnostics` und `"--smokescreen-dump=C:\absoluter\Diagnoseordner"`. Bildexporte enthalten private Informationen und erfolgen nur mit explizitem Dump-Argument. Höchstens zwölf Bildsätze werden innerhalb von 180 Sekunden gespeichert.
 
 ## Technik und Grenzen
 
-Die Maskierung gilt nur innerhalb reversibler Kamerarender-Transaktionen. Update, Physik und Rollenlogik behalten ihren echten Zustand. Der vorliegende Il2Cpp-Build stellt `AsyncGPUReadback` nicht bereit. Der Fallback nutzt `ReadPixels` und nichtgenerischen direkten Zugriff auf wiederverwendete Texturpuffer. Es gibt keine pixelweisen Il2Cpp-Zugriffe, generischen AOT-Aufrufe für den Readback oder neuen Pixelarrays pro Bild.
+Die Maskierung gilt einmal pro Frame vom ersten Kamerarender bis zum Frameende nach allen Bildschirmkameras. Ein Restore in Update und FixedUpdate sowie vor der TOR-Logik sichert ausgelassene Frameabschlüsse ab. Nur geänderte Texte erhalten erzwungene Meshupdates. Update, Physik und Rollenlogik behalten ihren echten Zustand. Der vorliegende Il2Cpp-Build stellt `AsyncGPUReadback` nicht bereit. Der Fallback nutzt `ReadPixels` und nichtgenerischen direkten Zugriff auf wiederverwendete Texturpuffer. Es gibt keine pixelweisen Il2Cpp-Zugriffe, generischen AOT-Aufrufe für den Readback oder neuen Pixelarrays pro Bild.
 
-Renderziele und CPU-Texturen tragen `HideFlags.DontUnloadUnusedAsset` und werden ausdrücklich freigegeben. Die Pixelzahl ist auf das Äquivalent von 3840×2160 begrenzt. Für die beiden zusätzlichen Renderdurchläufe und den synchronen Readback werden dauerhaft 30 fps nicht auf jedem System erreicht. Ein Overlay mit begrenzter Bildrate kann bei Bewegung zeitlich hinter einem schnelleren Spielbild liegen.
+Renderziele und CPU-Texturen tragen `HideFlags.DontUnloadUnusedAsset` und werden ausdrücklich freigegeben. Die Pixelzahl ist auf das Äquivalent von 3840×2160 begrenzt. Pro Ausgabe wird ein zusätzlicher echter Kamerastapel gerendert. Das maskierte Bild stammt aus dem regulären Bildschirmrender. Die Pixeldifferenz wird auf dem Overlay-Thread aus wiederverwendeten Doppelpuffern berechnet. Zwei synchrone ReadPixels bleiben erforderlich. Die neue Standardrate von 15 fps senkt die Belastung; bestehende konfigurierte Werte werden respektiert. Ein Overlay mit begrenzter Bildrate kann bei Bewegung zeitlich hinter einem schnelleren Spielbild liegen.
 
 Eigene Kamera-Nachbearbeitung, komplexe abhängige Texturkameras und UI mit `ScreenSpaceOverlay` können zusätzliche Integration benötigen. Neue Rollenobjekte anderer Modversionen sind nicht automatisch vollständig abgedeckt. Sichtbare Handlungen wie Töten, Verwandeln, Bewegung und öffentlich sichtbare Effekte bleiben mögliche Informationsquellen. Die öffentlich feste Rolle ändert die tatsächliche Spielrolle nicht.
 

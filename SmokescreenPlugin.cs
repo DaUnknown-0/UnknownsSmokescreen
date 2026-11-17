@@ -2,7 +2,7 @@
 // Licensed under GPL-3.0-or-later. See LICENSE for details.
 // Works on top of The Other Roles (https://github.com/TheOtherRolesAU/TheOtherRoles), GPL-3.0.
 
-// Das Spielfenster zeigt ausschließlich Crewmate. Die tatsächliche Rolle und der echte HUD
+// Waehrend der Runde zeigt das Spielfenster ausschliesslich Crewmate. Die tatsächliche Rolle und der echte HUD
 // bleiben im privaten, aufnahmegeschützten Kamerabild erhalten. Keine eigenen RPCs.
 
 global using Il2CppInterop.Runtime;
@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.1";
+    public const string Version = "0.3.0.2";
 
     internal static ManualLogSource Logger;
 
@@ -34,7 +34,6 @@ public class SmokescreenPlugin : BasePlugin
     internal static ConfigEntry<bool> OnlyInStreamerMode;
     internal static ConfigEntry<bool> HideButtons;
     internal static ConfigEntry<bool> HideFlashes;
-    internal static ConfigEntry<bool> ShowRecap;
     internal static ConfigEntry<bool> PrivateOverlay;
     internal static ConfigEntry<bool> RecordingFeed;
     internal static ConfigEntry<KeyCode> OverlayHotkey;
@@ -51,9 +50,9 @@ public class SmokescreenPlugin : BasePlugin
         HideButtons = Config.Bind("Mask", "HideRoleButtons", true,
             "Role buttons (kill, sabotage, vent, every TOR ability) are invisible but keep working (click spot and hotkey).");
         HideFlashes = Config.Bind("Mask", "HideRoleFlashes", true,
-            "Hide the coloured screen flashes of role abilities (Seer, Snitch, Medic ...). They show up in the round recap.");
-        ShowRecap = Config.Bind("Recap", "ShowRoundRecap", true,
-            "Rückblick nach einer geschützten Runde: öffentlich Crewmate, echte Details nur privat.");
+            "Hide the coloured screen flashes of role abilities (Seer, Snitch, Medic ...). The result screen remains unchanged.");
+        Config.Bind("Recap", "ShowRoundRecap", true, "Veralteter Eintrag");
+        Config.Remove(new ConfigDefinition("Recap", "ShowRoundRecap"));
 
         PrivateOverlay = Config.Bind("Overlay", "PrivateOverlay", true,
             "Echtes HUD pixelgenau über dem Spiel anzeigen. Erfordert verifiziertes WDA_EXCLUDEFROMCAPTURE (Windows 10 2004 oder neuer).");
@@ -61,7 +60,7 @@ public class SmokescreenPlugin : BasePlugin
             "Open an extra window with the same content that OBS CAN capture, for a separate local recording you upload later " +
             "(e.g. OBS plugin Source Record or a second OBS instance). Never put it into the live scene and keep it off the streamed display.");
         OverlayHotkey = Config.Bind("Overlay", "ToggleKey", KeyCode.F8, "Privates HUD einblenden oder ausblenden. Die Spielmaskierung bleibt aktiv.");
-        OverlayFps = Config.Bind("Overlay", "FramesPerSecond", 30, new ConfigDescription("Bildrate des privaten HUD, 5 bis 30.", new AcceptableValueRange<int>(5, 30)));
+        OverlayFps = Config.Bind("Overlay", "FramesPerSecond", 15, new ConfigDescription("Bildrate des privaten HUD, 5 bis 30.", new AcceptableValueRange<int>(5, 30)));
         DiagnosticMode = Config.Bind("Diagnostics", "Enabled", false, "Expliziter Diagnoselauf, maximal 180 Sekunden. Kein Umgehen von Fokus oder Aufnahmeschutz.");
 
         // Alte Schlüssel zunächst binden, damit sie aus den verwaisten Config-Einträgen
@@ -139,6 +138,7 @@ internal static class Shield
 {
     private static int frame = -1;
     private static bool cached;
+    internal static bool ResultScreen;
     internal static void Invalidate() => frame = -1;
 
     /// <summary>Streamer Mode (or "always") is on, independent of whether a round is running.</summary>
@@ -169,7 +169,7 @@ internal static class Shield
         try
         {
             if (!Wanted) return false;
-            if (EndScreenMask.Active) return true;
+            if (ResultScreen) return false;
             var client = AmongUsClient.Instance;
             if (client == null || client.GameState != InnerNet.InnerNetClient.GameStates.Started) return false;
             var local = PlayerControl.LocalPlayer;
