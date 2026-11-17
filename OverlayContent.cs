@@ -50,7 +50,7 @@ internal static class OverlayContent
     private static double renderMs;
     private static bool visible = true;
     private static bool diagnostic;
-    private static bool diagnosticInitialized;
+    private static bool diagnosticInitialized, diagnosticConfig;
     private static float diagnosticEnd;
     private static string probe;
     private static int probes;
@@ -63,7 +63,7 @@ internal static class OverlayContent
     {
         if (shutdown) return;
         BorderlessMode.Tick(Shield.Wanted && SmokescreenPlugin.PrivateOverlay.Value);
-        if (Input.GetKeyDown(SmokescreenPlugin.OverlayHotkey.Value) && OverlayHost.GameForeground)
+        if (!SettingsMenu.KeyConsumed && Input.GetKeyDown(SmokescreenPlugin.OverlayHotkey.Value) && OverlayHost.GameForeground)
             visible = !visible;
         // Das letzte private Bild erst nach dem ersten unmaskierten Bildschirm freigeben.
         releaseAfterFrame = !active;
@@ -188,7 +188,7 @@ internal static class OverlayContent
             if (label != null) Probe(label);
             PrivateSet.Track(positions, Screen.height, Time.realtimeSinceStartup);
             positions.Ortho = RenderState.Alive(mainCamera) ? mainCamera.orthographicSize : 0;
-            positions.Frame = Time.frameCount; positions.Probe = label;
+            positions.Frame = Time.frameCount; positions.Probe = label; positions.Delay = SmokescreenPlugin.SyncFrames.Value;
             OverlayHost.PublishPositions(positions);
         }
         if (!releaseAfterFrame || Shield.Active || CameraMaskScope.LastMaskedFrame == Time.frameCount) return;
@@ -264,7 +264,10 @@ internal static class OverlayContent
 
     private static void InitializeDiagnostics()
     {
+        // Im Menue umgeschaltet: neu initialisieren, damit die Aenderung sofort gilt.
+        if (diagnosticInitialized && diagnosticConfig != SmokescreenPlugin.DiagnosticMode.Value) diagnosticInitialized = false;
         if (diagnosticInitialized) return;
+        diagnosticConfig = SmokescreenPlugin.DiagnosticMode.Value;
         diagnosticInitialized = true;
         diagnostic = SmokescreenPlugin.DiagnosticMode.Value || Array.IndexOf(NativeArguments.Values, "--smokescreen-diagnostics") >= 0;
         diagnosticEnd = Time.realtimeSinceStartup + 180f;

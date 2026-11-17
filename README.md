@@ -32,17 +32,23 @@ Diese Option ist standardmäßig aus. Nur für eine getrennte lokale Aufnahme ve
 
 ## Einstellungen
 
+Alle Einstellungen lassen sich im Spiel ändern: Knopf **Smokescreen...** im Optionsmenü von Among Us (Hauptmenü, Lobby und Esc-Menü im Spiel) oder Taste **F3** (`General / MenuKey`). Das Menü übernimmt Optik und Schrift der Vanilla-Optionen, wird mit der Maus bedient und mit Esc oder dem Schließen-Knopf beendet. Änderungen wirken sofort und werden in die Config geschrieben; die Bildrate bleibt zwischen 5 und 30. Tasten werden belegt, indem man auf den Tastenknopf klickt und dann die gewünschte Taste drückt (Esc bricht ab). Beim Überfahren erklärt die Fußzeile jeden Eintrag; ist der RecordingFeed an, steht dort dauerhaft eine Warnung.
+
+Das Menü ist normales Spiel-UI und damit auch im Stream sichtbar. Es zeigt nur Einstellungen und neutrale Zustände („Schutz aktiv“, „Privates HUD aufnahmegeschützt“), nie Rolle oder Team. Wer auch die Einstellungen nicht zeigen will, öffnet es außerhalb einer Runde. Ist der Schutz beim Start per Config aus, lädt die Mod nur das Menü; nach dem Wiedereinschalten ist ein Neustart nötig.
+
 Datei: `BepInEx/config/com.daunknown.smokescreen.cfg`.
 
 | Einstellung | Standard | Bedeutung |
 |---|---|---|
 | `General / Enabled` | `true` | Schutz aktivieren. |
 | `General / OnlyInStreamerMode` | `true` | Nur bei aktiviertem Streamer-Modus schützen. |
+| `General / MenuKey` | `F3` | Einstellungsmenü öffnen und schließen. |
 | `Mask / HideRoleButtons` | `true` | Rollenknöpfe öffentlich ausblenden. |
 | `Mask / HideRoleFlashes` | `true` | Rollenhinweise nur privat darstellen. |
 | `Overlay / PrivateOverlay` | `true` | Privates echtes HUD anzeigen. |
 | `Overlay / ToggleKey` | `F8` | Privates Overlay einblenden und ausblenden. |
 | `Overlay / FramesPerSecond` | `15` | Zielbildrate von 5 bis 30. Die tatsächliche Rate hängt von GPU, Auflösung und Szene ab. |
+| `Overlay / SyncFrames` | `1` | Verankerte private Namen und Beschriftungen nutzen die Spielerlage von so vielen Frames zuvor (0 bis 4), weil das Spielbild später auf dem Monitor erscheint als das Overlay. Laufen private Namen beim Gehen voraus, erhöhen; hängen sie hinterher, verringern. Im Menü als "HUD sync". |
 | `Overlay / RecordingFeed` | `false` | Getrenntes aufnehmbares Wahrheitsfenster. |
 | `Diagnostics / Enabled` | `false` | Diagnose für maximal 180 Sekunden, ohne Lockerung von Fokus oder Aufnahmeschutz. |
 
@@ -54,7 +60,7 @@ Die Maskierung gilt einmal pro Frame vom ersten Kamerarender bis zum Frameende n
 
 Renderziele und CPU-Texturen tragen `HideFlags.DontUnloadUnusedAsset` und werden ausdrücklich freigegeben. Die Pixelzahl ist auf das Äquivalent von 3840×2160 begrenzt. Pro Aufnahme rendern Haupt- und UI-Kamera vier leichte Durchgänge in ein wiederverwendetes Renderziel mit zwei Bildschirm-Slots; die Hauptkamera sieht dabei nur einen sonst ungenutzten Layer, auf den die privaten Weltrenderer kurz gelegt werden. Gelesen werden nur die Inselrechtecke. Zerlegung, Platten und Komposition laufen auf dem Overlay-Thread ohne Unity-Zugriffe; pro Spielframe wird nur das geänderte Rechteck per `UpdateLayeredWindowIndirect` übertragen. Ein Vollbild wird nur für Intro, Meeting und einen aktiven RecordingFeed gerendert. Standard sind weiterhin 15 fps; explizite Werte bis 30 werden respektiert.
 
-Beim Ende der Maskierung bleibt das private Bild bis nach dem ersten unmaskierten Bildschirmrender erhalten. Bei einer Renderpause bleibt das letzte geschützte Bild stehen; Fokusverlust und fehlender Aufnahmeschutz blenden es weiterhin aus. Inhalte wie Cooldown-Zahlen aktualisieren sich mit der eingestellten Rate, ihre Lage mit jedem Spielframe. Ein neu auftauchendes privates Element erscheint erst mit der nächsten Aufnahme; bis dahin sieht man kurz die öffentliche Fassung. Private Weltobjekte am Boden werden über darüberlaufende Spieler gezeichnet. Inhalte in Texturkameras (z. B. Überwachungsbilder) zeigen privat die öffentliche Fassung.
+Beim Ende der Maskierung bleibt das private Bild bis nach dem ersten unmaskierten Bildschirmrender erhalten. Bei einer Renderpause bleibt das letzte geschützte Bild stehen; Fokusverlust und fehlender Aufnahmeschutz blenden es weiterhin aus. Inhalte wie Cooldown-Zahlen aktualisieren sich mit der eingestellten Rate, ihre Lage mit jedem Spielframe. Namen und Beschriftungen, die an Spielern hängen, liegen immer auf einem dunklen Namensschild, dessen Rand beim Laufen um bis zu einen Frame Bewegung wächst; ein kleiner Restversatz zum Spielbild legt so keine öffentliche Schrift frei. Ein neu auftauchendes privates Element erscheint erst mit der nächsten Aufnahme; bis dahin sieht man kurz die öffentliche Fassung. Private Weltobjekte am Boden werden über darüberlaufende Spieler gezeichnet. Inhalte in Texturkameras (z. B. Überwachungsbilder) zeigen privat die öffentliche Fassung.
 
 Eigene Kamera-Nachbearbeitung, komplexe abhängige Texturkameras und UI mit `ScreenSpaceOverlay` können zusätzliche Integration benötigen. Neue Rollenobjekte anderer Modversionen sind nicht automatisch vollständig abgedeckt. Sichtbare Handlungen wie Töten, Verwandeln, Bewegung und öffentlich sichtbare Effekte bleiben mögliche Informationsquellen. Die öffentlich feste Rolle ändert die tatsächliche Spielrolle nicht.
 

@@ -49,6 +49,21 @@ internal static class OverlayHost
             }
         thread = new Thread(Run) { IsBackground = true, Name = "SmokescreenHud" }; thread.Start();
     }
+    // Fenster nach einer Aenderung von PrivateOverlay oder RecordingFeed neu anlegen.
+    internal static void Restart(bool privateOverlay, bool recordingFeed)
+    {
+        Stop();
+        lock (gate)
+        {
+            epoch++;
+            if (pending != null) { free.Push(pending); pending = null; }
+            positionsPending = false; clearRequested = false;
+        }
+        shown = false; hasContent = false; needFull = true; presentedX = presentedY = int.MinValue;
+        historyCount = 0; historyNext = 0;
+        Start(privateOverlay, recordingFeed);
+        SmokescreenPlugin.Logger.LogInfo($"HUD-Fenster neu gestartet: privat={privateOverlay}, Feed={recordingFeed}");
+    }
     internal static void Stop()
     {
         show = feedActive = false; running = false;
@@ -74,6 +89,25 @@ internal static class OverlayHost
     private static int epoch;
     private static bool clearRequested;
     private static readonly AnchorPositions incoming = new(), current = new();
+    // Die Swapchain des Spiels zeigt einen Frame spaeter als DWM das Overlay. Verankerte Inseln nutzen deshalb
+    // die Ankerlage von SyncFrames Frames zuvor. Ringpuffer der letzten acht Lagen, nur Fensterthread.
+    private static readonly AnchorPositions[] history = { new(), new(), new(), new(), new(), new(), new(), new() };
+    private static int historyNext, historyCount;
+    // Gezaehlt wird in Spielframes, nicht in verarbeiteten Updates: faellt der Fensterthread kurz zurueck und
+    // fasst Updates zusammen, nimmt er die neueste Lage, die mindestens delay Frames alt ist.
+    private static AnchorPositions Delayed(int delay)
+    {
+        if (historyCount == 0 || delay <= 0) return current;
+        int target = current.Frame - delay;
+        AnchorPositions oldest = current;
+        for (int k = 0; k < historyCount; k++)
+        {
+            var h = history[(historyNext - 1 - k + history.Length * 2) % history.Length];
+            if (h.Frame <= target) return h;
+            oldest = h;
+        }
+        return oldest;
+    }
     private static bool positionsPending;
     private static int postedPositions, postedCapture;
     private static byte[] feedFill, feedReady;
@@ -198,7 +232,7 @@ internal static class OverlayHost
             }
             buildTicks += Stopwatch.GetTimestamp() - start;
             hasContent = true; lastCaptureAt = set.CapturedAt;
-            if (composer.Replace(pool, n, set.Ortho, current, out int x0, out int y0, out int x1, out int y1)) Present(x0, y0, x1, y1);
+            if (composer.Replace(pool, n, set.Ortho, Delayed(current.Delay), out int x0, out int y0, out int x1, out int y1)) Present(x0, y0, x1, y1);
             captures++; captureTicks += Stopwatch.GetTimestamp() - start;
             Report();
         }
@@ -209,14 +243,27 @@ internal static class OverlayHost
     {
         Interlocked.Exchange(ref postedPositions, 0);
         lock (gate) { if (!positionsPending) return; current.CopyFrom(incoming); positionsPending = false; }
+        history[historyNext].CopyFrom(current); historyNext = (historyNext + 1) % history.Length; historyCount = Math.Min(historyCount + 1, history.Length);
         long start = Stopwatch.GetTimestamp();
-        if (composer.Move(current, out int x0, out int y0, out int x1, out int y1)) Present(x0, y0, x1, y1);
-        moves++; moveTicks += Stopwatch.GetTimestamp() - start;
+        var display = Delayed(current.Delay);
+        bool probed = false; int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
         if (current.Probe != null)
         {
+            // Diagnose vergleicht mit dem echten Bild genau dieses Frames: dafuer ohne Verzoegerung komponieren.
+            // Das dabei geaenderte Rechteck (alte dargestellte Lage) muss mit dargestellt werden, sonst bleibt sie stehen.
+            probed = composer.Move(current, out px0, out py0, out px1, out py1);
             try { DumpProbe(current.Probe, current.Frame); }
             catch (Exception e) { diagnosticDirectory = null; SmokescreenPlugin.Logger.LogWarning("HUD-Diagnose: " + e.Message); }
         }
+        bool moved = composer.Move(display, out int x0, out int y0, out int x1, out int y1);
+        if (probed)
+        {
+            if (!moved) { x0 = px0; y0 = py0; x1 = px1; y1 = py1; }
+            else { x0 = Math.Min(x0, px0); y0 = Math.Min(y0, py0); x1 = Math.Max(x1, px1); y1 = Math.Max(y1, py1); }
+            moved = true;
+        }
+        if (moved) Present(x0, y0, x1, y1);
+        moves++; moveTicks += Stopwatch.GetTimestamp() - start;
     }
 
     private static void ProcessFeed()
@@ -332,8 +379,9 @@ internal static class OverlayHost
             if(priv!=IntPtr.Zero) { Native.ShowWindow(priv,0); Native.DestroyWindow(priv); }
             if(rec!=IntPtr.Zero) Native.DestroyWindow(rec);
             unsafe { composer.Attach(null,0,0); }
-            surface?.Dispose(); recording?.Dispose(); priv=rec=IntPtr.Zero; surface=null;
-            lock(gate) { truth=null; pending=null; feedFill=feedReady=null; }
+            surface?.Dispose(); recording?.Dispose(); priv=rec=IntPtr.Zero; surface=null; recording=null;
+            lock(gate) { truth=null; if(pending!=null) free.Push(pending); pending=null; feedFill=feedReady=null; }
+            Native.UnregisterClassW(cls,instance);
         }
     }
     private static IntPtr WindowProc(IntPtr hwnd,uint msg,IntPtr w,IntPtr l)
@@ -538,6 +586,7 @@ internal static class Native
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandleW(string name);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool UnregisterClassW(string cls, IntPtr instance);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr CreateWindowExW(uint exStyle, string cls, string title, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
     [DllImport("user32.dll")] public static extern IntPtr DefWindowProcW(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);

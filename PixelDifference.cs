@@ -33,6 +33,7 @@ internal struct IslandDesc
     public int Radius;              // Plattenradius in Pixeln
     public bool Opaque;             // Vollbild: echtes Bild deckend, nur ein Slot
     public bool Hud;                // aus den HUD-Durchgaengen; Pixelbesitz nur innerhalb derselben Quelle
+    public bool Plate;              // verankerter Text: jede Aenderung bekommt ein Band (Schutz gegen Restversatz)
 }
 
 // Fertige Insel: vormultipliziertes BGRA, Zeilen von oben. Keine Unity-Objekte.
@@ -88,7 +89,8 @@ internal static class IslandBuilder
             {
                 uint rb = s[x], rw = s[col + x], mb = s[2 * col + x], mw = s[3 * col + x];
                 if (((rb ^ mb) & 0xFFFFFFu) == 0 && ((rw ^ mw) & 0xFFFFFFu) == 0) { output[o + x] = 0; distance[o + x] = 0; continue; }
-                if (Solve(rb, rw, mb, mw, out uint pixel)) { output[o + x] = pixel; distance[o + x] = 1; }
+                if (Solve(rb, rw, mb, mw, out uint pixel) && !d.Plate) { output[o + x] = pixel; distance[o + x] = 1; }
+                else if (d.Plate) { output[o + x] = pixel; distance[o + x] = 2; seeds++; }
                 else { output[o + x] = 0; distance[o + x] = 2; seeds++; }
             }
         }
@@ -285,7 +287,7 @@ internal sealed class AnchorPositions
     internal readonly float[] X = new float[64], Y = new float[64];
     internal int Count;
     internal float Ortho;
-    internal int Frame;
+    internal int Frame, Delay;
     internal string Probe;
     internal bool Find(long key, out float x, out float y)
     {
@@ -294,7 +296,7 @@ internal sealed class AnchorPositions
     }
     internal void CopyFrom(AnchorPositions o)
     {
-        Count = o.Count; Ortho = o.Ortho; Frame = o.Frame; Probe = o.Probe;
+        Count = o.Count; Ortho = o.Ortho; Frame = o.Frame; Probe = o.Probe; Delay = o.Delay;
         Array.Copy(o.Keys, Keys, Count); Array.Copy(o.X, X, Count); Array.Copy(o.Y, Y, Count);
     }
 }

@@ -32,7 +32,7 @@ internal static class PrivateSet
         public bool Known;
     }
     // Hud: Elemente der UI-Kamera. Sie werden getrennt von den Weltelementen aufgenommen.
-    private struct Box { public long Key; public bool Hud; public int X0, Y0, X1, Y1; public int Radius; public Anchor Anchor; }
+    private struct Box { public long Key; public bool Hud, Text; public int X0, Y0, X1, Y1; public int Radius; public Anchor Anchor; }
 
     private static readonly List<Item> items = new();
     private static readonly Dictionary<IntPtr, Item> byPointer = new();
@@ -160,13 +160,13 @@ internal static class PrivateSet
             {
                 if (!Anchors.TryGetValue(item.Key, out anchor)) Anchors[item.Key] = anchor = new Anchor();
                 anchor.Transform = item.Anchor; anchor.Camera = item.Camera; anchor.Capture = CaptureIndex;
-                // Rest-Versatz zwischen Overlay und Spielbild ist hoechstens etwa ein Frame.
-                radius += Math.Min(8, (int)Math.Ceiling(anchor.Speed * 0.012f));
+                // Rest-Versatz zwischen Overlay und Spielbild ist hoechstens etwa ein Frame (bei 60 Hz rund 17 ms).
+                radius += Math.Min(item.Text != null ? 14 : 8, (int)Math.Ceiling(anchor.Speed * (item.Text != null ? 0.017f : 0.012f)));
             }
             int margin = radius + IslandBuilder.Feather + 2;
             AddBox(new Box
             {
-                Key = item.Key, Hud = !item.Main, Radius = radius, Anchor = anchor,
+                Key = item.Key, Hud = !item.Main, Text = item.Text != null, Radius = radius, Anchor = anchor,
                 X0 = Math.Max(0, (int)Math.Floor(item.X0) - margin), Y0 = Math.Max(0, (int)Math.Floor(item.Y0) - margin),
                 X1 = Math.Min(width, (int)Math.Ceiling(item.X1) + margin), Y1 = Math.Min(height, (int)Math.Ceiling(item.Y1) + margin),
             });
@@ -192,6 +192,7 @@ internal static class PrivateSet
             box.X0 = Math.Min(box.X0, b.X0); box.Y0 = Math.Min(box.Y0, b.Y0);
             box.X1 = Math.Max(box.X1, b.X1); box.Y1 = Math.Max(box.Y1, b.Y1);
             box.Radius = Math.Max(box.Radius, b.Radius);
+            box.Text = box.Text && b.Text;
             AddBox(box);
             return;
         }
@@ -284,7 +285,7 @@ internal static class PrivateSet
             {
                 X = b.X0, Y = b.Y0, W = b.X1 - b.X0, H = b.Y1 - b.Y0, Column = g.W,
                 AtlasX = g.AtlasX + (b.X0 - g.X), AtlasY = g.AtlasY + (b.Y0 - g.Y),
-                Key = b.Key, AnchorX = ax, AnchorY = ay, Radius = b.Radius, Hud = b.Hud,
+                Key = b.Key, AnchorX = ax, AnchorY = ay, Radius = b.Radius, Hud = b.Hud, Plate = b.Text && b.Key != 0,
             };
         }
     }

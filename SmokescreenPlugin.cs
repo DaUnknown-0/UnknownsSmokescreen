@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.4";
+    public const string Version = "0.3.0.5";
 
     internal static ManualLogSource Logger;
 
@@ -37,7 +37,9 @@ public class SmokescreenPlugin : BasePlugin
     internal static ConfigEntry<bool> PrivateOverlay;
     internal static ConfigEntry<bool> RecordingFeed;
     internal static ConfigEntry<KeyCode> OverlayHotkey;
+    internal static ConfigEntry<KeyCode> MenuHotkey;
     internal static ConfigEntry<int> OverlayFps;
+    internal static ConfigEntry<int> SyncFrames;
     internal static ConfigEntry<bool> DiagnosticMode;
 
     public override void Load()
@@ -60,7 +62,9 @@ public class SmokescreenPlugin : BasePlugin
             "Open an extra window with the same content that OBS CAN capture, for a separate local recording you upload later " +
             "(e.g. OBS plugin Source Record or a second OBS instance). Never put it into the live scene and keep it off the streamed display.");
         OverlayHotkey = Config.Bind("Overlay", "ToggleKey", KeyCode.F8, "Privates HUD einblenden oder ausblenden. Die Spielmaskierung bleibt aktiv.");
+        MenuHotkey = Config.Bind("General", "MenuKey", KeyCode.F3, "Opens the Smokescreen settings menu (also reachable through the game's options menu).");
         OverlayFps = Config.Bind("Overlay", "FramesPerSecond", 15, new ConfigDescription("Bildrate des privaten HUD, 5 bis 30.", new AcceptableValueRange<int>(5, 30)));
+        SyncFrames = Config.Bind("Overlay", "SyncFrames", 1, new ConfigDescription("Frames the game image is shown later than the private HUD. Names and labels that move with players use the position from this many frames ago (0 to 4).", new AcceptableValueRange<int>(0, 4)));
         DiagnosticMode = Config.Bind("Diagnostics", "Enabled", false, "Expliziter Diagnoselauf, maximal 180 Sekunden. Kein Umgehen von Fokus oder Aufnahmeschutz.");
 
         // Alte Schlüssel zunächst binden, damit sie aus den verwaisten Config-Einträgen
@@ -71,15 +75,18 @@ public class SmokescreenPlugin : BasePlugin
         Config.Remove(new ConfigDefinition("Mask", "ShuffleGhostInfo"));
         Config.Save();
         RegisterInModManager();
-        if (!Enabled.Value)
-        {
-            Logger.LogInfo($"{Name} is disabled in its config, nothing patched.");
-            return;
-        }
-
         ClassInjector.RegisterTypeInIl2Cpp<SmokescreenRunner>();
         ClassInjector.RegisterTypeInIl2Cpp<CameraMaskScope>();
         AddComponent<SmokescreenRunner>();
+        if (!Enabled.Value)
+        {
+            // Nur das Einstellungsmenue, damit der Schutz dort wieder eingeschaltet werden kann.
+            SettingsMenu.PatchedAtStartup = false;
+            try { new Harmony(Guid).CreateClassProcessor(typeof(SettingsMenuButton)).Patch(); }
+            catch (Exception e) { Logger.LogError("patch SettingsMenuButton failed: " + e.Message); }
+            Logger.LogInfo($"{Name} is disabled in its config, only the settings menu is active.");
+            return;
+        }
         OverlayHost.Start(PrivateOverlay.Value, RecordingFeed.Value);
         // Class by class: one patch that does not fit this game or TOR version must not take the others down.
         var harmony = new Harmony(Guid);
@@ -229,6 +236,41 @@ internal static class Texts
         ["overlay.flash"] = ("flash", "Hinweis"),
         ["overlay.roles"] = ("Roles", "Rollen"),
         ["overlay.waiting"] = ("waiting for a protected round", "wartet auf eine geschützte Runde"),
+        ["menu.on"] = ("On", "An"),
+        ["menu.off"] = ("Off", "Aus"),
+        ["menu.enabled"] = ("Protection", "Schutz"),
+        ["menu.enabled.hint"] = ("Masks your role for the camera in protected rounds. Off: the game window shows everything.", "Maskiert deine Rolle für die Kamera in geschützten Runden. Aus: das Spielfenster zeigt alles."),
+        ["menu.streamer"] = ("Streamer-only", "Nur Streamer"),
+        ["menu.streamer.hint"] = ("On: protect only while the Among Us Streamer Mode is on (Settings, General). Off: always protect.", "An: nur schützen, solange der Streamer-Modus von Among Us an ist. Aus: immer schützen."),
+        ["menu.buttons"] = ("Hide role buttons", "Rollenknöpfe verbergen"),
+        ["menu.buttons.hint"] = ("Kill, sabotage, vent and ability buttons are invisible on stream but keep working.", "Kill-, Sabotage-, Vent- und Fähigkeitsknöpfe sind im Stream unsichtbar, funktionieren aber weiter."),
+        ["menu.flashes"] = ("Hide role flashes", "Rollenblitze verbergen"),
+        ["menu.flashes.hint"] = ("Hides coloured screen flashes of role abilities from the camera.", "Verbirgt farbige Bildschirmblitze von Rollenfähigkeiten vor der Kamera."),
+        ["menu.overlay"] = ("Private HUD", "Privates HUD"),
+        ["menu.overlay.hint"] = ("Shows you the real HUD on top of the game. Windows excludes it from capture, OBS cannot see it.", "Zeigt dir das echte HUD über dem Spiel. Windows schließt es von Aufnahmen aus, OBS sieht es nicht."),
+        ["menu.feed"] = ("Recording feed", "Aufnahme-Feed"),
+        ["menu.feed.hint"] = ("WARNING: opens a capturable window with your REAL view for a separate local recording. Never add it to a live scene.", "WARNUNG: öffnet ein aufnehmbares Fenster mit deiner ECHTEN Sicht für eine getrennte lokale Aufnahme. Nie in eine Live-Szene aufnehmen."),
+        ["menu.feed.warning"] = ("Recording feed is ON: the feed window shows your real view. Keep it out of every live scene.", "Aufnahme-Feed ist AN: das Feed-Fenster zeigt deine echte Sicht. Aus jeder Live-Szene heraushalten."),
+        ["menu.key.overlay"] = ("HUD key", "HUD-Taste"),
+        ["menu.key.overlay.hint"] = ("Key that shows or hides the private HUD. Click, then press a key (Esc cancels).", "Taste zum Ein- und Ausblenden des privaten HUD. Klicken, dann Taste drücken (Esc bricht ab)."),
+        ["menu.key.menu"] = ("Menu key", "Menütaste"),
+        ["menu.key.menu.hint"] = ("Key that opens this menu. Click, then press a key (Esc cancels).", "Taste, die dieses Menü öffnet. Klicken, dann Taste drücken (Esc bricht ab)."),
+        ["menu.key.press"] = ("Press a key...", "Taste drücken..."),
+        ["menu.fps.hint"] = ("How often the private HUD content is refreshed (5 to 30). Its position follows every frame.", "Wie oft der Inhalt des privaten HUD erneuert wird (5 bis 30). Die Lage folgt jedem Frame."),
+        ["menu.sync"] = ("HUD sync", "HUD-Sync"),
+        ["menu.sync.frames"] = ("{0} frames", "{0} Frames"),
+        ["menu.sync.hint"] = ("If private names or labels run ahead of players while walking, increase; if they trail, decrease. Applies instantly.", "Laufen private Namen beim Gehen den Spielern voraus, erhöhen; hängen sie hinterher, verringern. Wirkt sofort."),
+        ["menu.diagnostics"] = ("Diagnostics", "Diagnose"),
+        ["menu.diagnostics.hint"] = ("Logs overlay timings for 180 seconds of the next protected round. Only for troubleshooting.", "Protokolliert 180 Sekunden lang Overlay-Zeiten der nächsten geschützten Runde. Nur zur Fehlersuche."),
+        ["menu.saved"] = ("Changes apply immediately and are saved to the config file.", "Änderungen wirken sofort und werden in die Config gespeichert."),
+        ["menu.status.off"] = ("Protection: off", "Schutz: aus"),
+        ["menu.status.restart"] = ("Protection: restart Among Us to load it", "Schutz: Among Us neu starten, um ihn zu laden"),
+        ["menu.status.streamer"] = ("Protection: Streamer Mode is off", "Schutz: Streamer-Modus ist aus"),
+        ["menu.status.active"] = ("Protection: active", "Schutz: aktiv"),
+        ["menu.status.waiting"] = ("Protection: ready for the next round", "Schutz: bereit für die nächste Runde"),
+        ["menu.overlay.disabled"] = ("Private HUD: off", "Privates HUD: aus"),
+        ["menu.overlay.failed"] = ("Private HUD: not available on this system", "Privates HUD: auf diesem System nicht verfügbar"),
+        ["menu.overlay.ok"] = ("Private HUD: capture-protected", "Privates HUD: aufnahmegeschützt"),
     };
 
     public static string T(string key)

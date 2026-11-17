@@ -58,6 +58,7 @@ public class SmokescreenRunner : MonoBehaviour
         }
         wasStarted = started;
 
+        SettingsMenu.Tick();
         bool active = Shield.Active;
         OverlayContent.Tick(active);
 
