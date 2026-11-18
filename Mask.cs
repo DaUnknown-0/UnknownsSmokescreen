@@ -40,8 +40,19 @@ public class SmokescreenRunner : MonoBehaviour
     private void Update() => CameraMaskScope.Restore();
     private void FixedUpdate() => CameraMaskScope.Restore();
 
-    private void OnApplicationQuit() { OverlayContent.Dispose(); OverlayHost.Stop(); }
-    private void OnDestroy() { PrivacyNotice.Clear(); OverlayContent.Dispose(); OverlayHost.Stop(); }
+    private void OnApplicationQuit() => Shutdown();
+    private void OnDestroy() => Shutdown();
+
+    private static void Shutdown()
+    {
+        CaptureWatch.Stop();
+        ViewerServer.Stop();
+        DelayedRecording.Reset();
+        ViewerExplanation.Clear();
+        PrivacyNotice.Clear();
+        OverlayContent.Dispose();
+        OverlayHost.Stop();
+    }
 
     private void LateUpdate()
     {
@@ -60,13 +71,18 @@ public class SmokescreenRunner : MonoBehaviour
             Shield.ResultScreen = false;
             Shield.Invalidate();
             OverlayContent.Reset();
+            RoundOutputs.Begin();
         }
         wasStarted = started;
 
         SettingsMenu.Tick();
         bool active = Shield.Active;
+        RoundOutputs.Tick(started);
+        CaptureWatch.Tick(started && !Shield.ResultScreen, active);
         try { PrivacyNotice.Tick(active); }
         catch (Exception) { PrivacyNotice.Clear(); }
+        try { ViewerExplanation.Tick(active); }
+        catch (Exception) { ViewerExplanation.Clear(); }
         OverlayContent.Tick(active);
 
     }

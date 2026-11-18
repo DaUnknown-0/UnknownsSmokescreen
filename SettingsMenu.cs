@@ -37,7 +37,8 @@ internal static class SettingsMenu
     private static ConfigEntry<KeyCode> listening;
     private static int consumedFrame = -1;
     private static string hover;
-    private static bool advanced;
+    private enum Page { General, Privacy, Capture, Viewers }
+    private static Page page;
     internal static bool PatchedAtStartup = true;
 
     // In diesem Frame hat das Menue eine Taste verbraucht (Belegung oder Umschalten).
@@ -162,7 +163,8 @@ internal static class SettingsMenu
         title = Label("Title", new Vector3(0, 2.32f, -1), 3.2f, Color.white);
         title.text = "Unknown's Smokescreen";
         status = Label("Status", new Vector3(0, 1.82f, -1), 1.5f, new Color(0.85f, 0.85f, 0.85f));
-        status.enableWordWrapping = false;
+        status.enableWordWrapping = true;
+        status.overflowMode = TextOverflowModes.Ellipsis;
         status.fontSizeMin = 1f;
         status.fontSizeMax = 1.5f;
         status.enableAutoSizing = true;
@@ -170,16 +172,14 @@ internal static class SettingsMenu
         hint.rectTransform.sizeDelta = new Vector2(5.2f, 0.6f);
         hint.enableWordWrapping = true;
 
-        Button("Page", 0, -1.9f, 2.2f, () => T(advanced ? "menu.general" : "menu.privacy"), () => Neutral, "menu.page.hint", () =>
-        {
-            var currentMenu = FindMenu();
-            if (!Alive(currentMenu)) return;
-            advanced = !advanced;
-            hover = null;
-            Build(currentMenu);
-            Open();
-        });
-        if (advanced)
+        Page other = page == Page.General ? Page.Privacy : Page.General;
+        Button("Page", 0, -1.9f, 1.45f, () => T(other == Page.Privacy ? "menu.privacy" : "menu.general"),
+            () => Neutral, "menu.page.hint", () => ShowPage(other));
+        if (page != Page.Capture)
+            Button("CapturePage", -1.55f, -1.9f, 1.45f, () => T("menu.capture"), () => Neutral, "menu.page.hint", () => ShowPage(Page.Capture));
+        if (page != Page.Viewers)
+            Button("ViewersPage", 1.55f, -1.9f, 1.45f, () => T("menu.viewers"), () => Neutral, "menu.page.hint", () => ShowPage(Page.Viewers));
+        if (page == Page.Privacy)
         {
             Choice(-1.17f, 1.25f, "vision", SmokescreenPlugin.CrewVision);
             Toggle(1.17f, 1.25f, () => T("menu.leak"), SmokescreenPlugin.LeakWatch, "menu.leak.hint");
@@ -190,6 +190,8 @@ internal static class SettingsMenu
             Button("Allowlist", 0, -0.64f, 4.4f, () => T("menu.allow"), () => Neutral, "menu.allow.hint", LeakGuard.AllowLast);
             Button("AllowClear", 0, -1.27f, 4.4f, () => T("menu.allow.clear"), () => Neutral, "menu.allow.hint", () => SmokescreenPlugin.LeakAllowlist.Value = "");
         }
+        else if (page == Page.Capture) BuildCapture();
+        else if (page == Page.Viewers) BuildViewers();
         else
         {
         float[] row = { 1.25f, 0.62f, -0.01f, -0.64f, -1.27f };
@@ -197,8 +199,8 @@ internal static class SettingsMenu
         Toggle(1.17f, row[0], () => T("menu.streamer"), SmokescreenPlugin.OnlyInStreamerMode, "menu.streamer.hint");
         Toggle(-1.17f, row[1], () => T("menu.buttons"), SmokescreenPlugin.HideButtons, "menu.buttons.hint");
         Toggle(1.17f, row[1], () => T("menu.flashes"), SmokescreenPlugin.HideFlashes, "menu.flashes.hint");
-        Toggle(-1.17f, row[2], () => T("menu.overlay"), SmokescreenPlugin.PrivateOverlay, "menu.overlay.hint", OverlayChanged);
-        Toggle(1.17f, row[2], () => T("menu.feed"), SmokescreenPlugin.RecordingFeed, "menu.feed.hint", OverlayChanged, true);
+        Toggle(-1.17f, row[2], () => T("menu.overlay"), SmokescreenPlugin.PrivateOverlay, "menu.overlay.hint");
+        Toggle(1.17f, row[2], () => T("menu.feed.permission"), SmokescreenPlugin.RecordingFeed, "menu.feed.hint", warning: true);
         KeyButton(-1.17f, row[3], "menu.key.overlay", SmokescreenPlugin.OverlayHotkey);
         KeyButton(1.17f, row[3], "menu.key.menu", SmokescreenPlugin.MenuHotkey);
         Button("Minus", -2.0f, row[4], 0.55f, () => "-", () => Neutral, "menu.fps.hint", () => Step(SmokescreenPlugin.OverlayFps, -1, 5, 30));
@@ -211,6 +213,86 @@ internal static class SettingsMenu
         // Ueber anderen HUD-Elementen (z. B. Hilfe-Knoepfe anderer Mods) zeichnen.
         foreach (var r in popup.GetComponentsInChildren<Renderer>(true)) r.sortingOrder = Math.Max(r.sortingOrder, 0) + 2000;
         SmokescreenPlugin.Logger.LogInfo("Einstellungsmenue aufgebaut (" + entries.Count + " Elemente)");
+    }
+
+    private static void ShowPage(Page next)
+    {
+        var menu = FindMenu();
+        if (!Alive(menu)) return;
+        page = next;
+        hover = null;
+        Build(menu);
+        Open();
+    }
+
+    private static void BuildCapture()
+    {
+        Toggle(-1.17f, 1.25f, () => T("menu.capture.watch.label"), SmokescreenPlugin.ObsWatch, "menu.capture.watch");
+        Button("SelfTest", 1.17f, 1.25f, 2.2f, () => T(CaptureSelfTest.Running ? "menu.capture.testing" : "menu.capture.start"),
+            () => Neutral, "menu.capture.test", CaptureSelfTest.Start);
+        CaptureVerdict(-1.55f, "GDI", r => r.Gdi);
+        CaptureVerdict(0, "DXGI", r => r.Dxgi);
+        CaptureVerdict(1.55f, "WGC", r => r.Wgc);
+        Button("UnlockFeed", -1.17f, -0.01f, 2.2f, () => T(SmokescreenPlugin.FeedEnabled ? "menu.feed.lock" : "menu.feed.unlock"),
+            () => SmokescreenPlugin.FeedEnabled ? Warn : SmokescreenPlugin.RecordingFeed.Value ? Neutral : Off,
+            "menu.capture.unlock", () =>
+            {
+                if (SmokescreenPlugin.RecordingFeed.Value)
+                    SmokescreenPlugin.SetFeedUnlocked(!SmokescreenPlugin.FeedUnlocked);
+            });
+        Toggle(1.17f, -0.01f, () => T("menu.capture.replay.label"), SmokescreenPlugin.DelayedReplay, "menu.capture.replay", () =>
+        {
+            if (SmokescreenPlugin.DelayedReplay.Value) return;
+            DelayedRecording.Reset();
+            OverlayContent.ReleaseReplay();
+        });
+        Button("ExportReplay", 0, -0.64f, 4.4f, () => T("menu.capture.export.label"),
+            () => DelayedRecording.CanExport ? On : Neutral, "menu.capture.export", DelayedRecording.Export);
+        Button("RetryPrivateHud", 0, -1.27f, 4.4f, () => T("menu.capture.retry"),
+            () => OverlayHost.ProtectionFailed && SmokescreenPlugin.PrivateOverlay.Value ? Warn : Neutral,
+            "menu.capture.retry.hint", () =>
+            {
+                if (OverlayHost.ProtectionFailed && SmokescreenPlugin.PrivateOverlay.Value) OverlayChanged();
+            });
+    }
+
+    private static void CaptureVerdict(float x, string name, Func<CaptureSelfTest.Report, CaptureSelfTest.Verdict> get)
+    {
+        CaptureSelfTest.Verdict Verdict() => CaptureSelfTest.Results is { } result && !CaptureSelfTest.Running
+            ? get(result) : CaptureSelfTest.Verdict.Untested;
+        Button("Test" + name, x, 0.62f, 1.45f, () => name + " " + T(Verdict() switch
+        {
+            CaptureSelfTest.Verdict.Excluded => "menu.capture.excluded",
+            CaptureSelfTest.Verdict.Visible => "menu.capture.visible",
+            _ => "menu.capture.untested"
+        }), () => Verdict() switch
+        {
+            CaptureSelfTest.Verdict.Excluded => On,
+            CaptureSelfTest.Verdict.Visible => Off,
+            _ => Neutral
+        }, "menu.capture.result", null);
+    }
+
+    private static void BuildViewers()
+    {
+        Toggle(0, 1.25f, () => T("menu.viewers.server.label"), SmokescreenPlugin.ViewerPage, "menu.viewers.server");
+        Button("ViewerPortMinus", -1.75f, 0.62f, 0.85f, () => "-", () => Neutral, "menu.viewers.port", () => StepPort(-1));
+        Button("ViewerPort", 0, 0.62f, 2.55f, () => "Port " + SmokescreenPlugin.ViewerPort.Value, () => Neutral, "menu.viewers.port", null);
+        Button("ViewerPortPlus", 1.75f, 0.62f, 0.85f, () => "+", () => Neutral, "menu.viewers.port", () => StepPort(1));
+        Toggle(-1.17f, -0.01f, () => T("menu.viewers.explanation.label"), SmokescreenPlugin.ViewerNotice, "menu.viewers.explanation");
+        Button("ViewerPosition", 1.17f, -0.01f, 2.2f,
+            () => T(SmokescreenPlugin.ViewerNoticePosition.Value == ViewerPosition.Top ? "menu.viewers.top" : "menu.viewers.bottom"),
+            () => Neutral, "menu.viewers.position", () => SmokescreenPlugin.ViewerNoticePosition.Value =
+                SmokescreenPlugin.ViewerNoticePosition.Value == ViewerPosition.Top ? ViewerPosition.Bottom : ViewerPosition.Top);
+        Button("ViewerAddress", 0, -0.64f, 4.4f, () => ViewerServer.Address,
+            () => ViewerServer.Running ? On : ViewerServer.Failed ? Off : Neutral, "menu.viewers.server", null);
+    }
+
+    private static void StepPort(int direction)
+    {
+        int delta = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift) ? 100 : 1;
+        int port = Math.Clamp(SmokescreenPlugin.ViewerPort.Value + direction * delta, 1024, 65535);
+        SmokescreenPlugin.ViewerPort.Value = port == 8765 ? port + direction : port;
     }
 
     private static TextMeshPro Label(string name, Vector3 position, float size, Color color)
@@ -308,11 +390,11 @@ internal static class SettingsMenu
     }
 
     // PrivateOverlay und RecordingFeed legen Fenster an oder entfernen sie: Fensterthread neu starten.
-    private static void OverlayChanged()
+    internal static void OverlayChanged()
     {
         if (!PatchedAtStartup) return;
         OverlayContent.Reset();
-        OverlayHost.Restart(SmokescreenPlugin.PrivateOverlay.Value, SmokescreenPlugin.RecordingFeed.Value);
+        OverlayHost.Restart(SmokescreenPlugin.PrivateOverlay.Value, SmokescreenPlugin.FeedEnabled);
     }
 
     private static void Listen()
@@ -355,11 +437,21 @@ internal static class SettingsMenu
             e.Background.color = c;
             if (e.Fitted == 0) { Fit(e); e.Fitted = 1; }
         }
-        if (Alive(status)) status.text = Status();
+        bool feed = SmokescreenPlugin.FeedEnabled;
+        if (Alive(status))
+        {
+            status.text = feed ? T("menu.feed.warning.short") : Status();
+            status.color = feed ? Warn : new Color(0.85f, 0.85f, 0.85f);
+        }
         if (Alive(hint))
         {
-            bool feed = SmokescreenPlugin.RecordingFeed.Value;
             string text = hover != null ? T(hover) : feed ? T("menu.feed.warning") : T("menu.saved");
+            if (hover == null && !feed && page == Page.Capture)
+                text = DelayedRecording.Status ?? CaptureResultHint() ?? T("menu.capture.test");
+            if (!feed && hover == "menu.capture.result") text = CaptureResultHint() ?? text;
+            if (!feed && hover == "menu.capture.export" && DelayedRecording.Status is string exportStatus) text = exportStatus;
+            if (hover == null && SmokescreenPlugin.PrivateOverlay.Value && OverlayHost.AffinityFailure is { } failure)
+                text = failure.Description;
             hint.text = text;
             hint.color = hover == "menu.feed.hint" || (hover == null && feed) ? Warn : new Color(0.85f, 0.85f, 0.85f);
         }
@@ -372,6 +464,7 @@ internal static class SettingsMenu
     }
 
     private static string T(string key) => Texts.T(key);
+    private static string CaptureResultHint() => CaptureSelfTest.Results?.Message is { } key ? T(key) : null;
 }
 
 // Knopf "Smokescreen..." im Vanilla-Optionsmenue, neben dem Streamer-Modus-Schalter.

@@ -87,6 +87,8 @@ internal static class OverlayContent
         DiscoverCameras();
         try { VisionMask.Prepare(); }
         catch (Exception) { VisionMask.Ready = false; }
+        if (SmokescreenPlugin.DelayedReplay.Value && RenderState.Alive(mainCamera) && DelayedRecording.TryBeginSample())
+            CaptureDelayed();
         var minigame = ActiveMinigame;
         if (minigame != minigameAtCapture) next = 0;
         bool wantPrivate = OverlayHost.PrivateWanted, wantFeed = OverlayHost.FeedWanted;
@@ -109,7 +111,7 @@ internal static class OverlayContent
             bool full = RenderState.Alive(Mask.Intro) || RenderState.Alive(MeetingHud.Instance) || privateLayer < 0 || !RenderState.Alive(mainCamera);
             if (wantFeed)
             {
-                RenderFull(0);
+                RenderFull(stage[0]);
                 OverlayHost.PublishFeed(ReadFull(w, h), w, h);
             }
             if (full && wantPrivate)
@@ -199,7 +201,7 @@ internal static class OverlayContent
 
     private static void RenderPrivateFull(int slot)
     {
-        try { VisionMask.Apply(); RenderFull(slot); }
+        try { VisionMask.Apply(); RenderFull(stage[slot]); }
         finally { VisionMask.Restore(); }
     }
 
@@ -258,7 +260,7 @@ internal static class OverlayContent
             Rendering = true;
             if (!RenderState.Alive(probeCpu)) probeCpu = Cpu(width, height);
             // Der Zustand ist jetzt der des regulaeren, maskierten Frames.
-            RenderFull(0); Read(probeCpu, 0, 0, 0, width, height, 0);
+            RenderFull(stage[0]); Read(probeCpu, 0, 0, 0, width, height, 0);
             CameraMaskScope.Restore();
             RenderPrivateFull(1); Read(fullCpu, 0, 0, 1, width, height, 0);
             Directory.CreateDirectory(directory);
@@ -407,12 +409,7 @@ internal static class OverlayContent
     {
         if (width == w && height == h && RenderState.Alive(stage[0]) && RenderState.Alive(stage[1])) return;
         ReleaseImages(); width = w; height = h;
-        if (!RenderState.Alive(copy))
-        {
-            var go = new GameObject("SmokescreenPrivateCamera");
-            UnityEngine.Object.DontDestroyOnLoad(go);
-            copy = go.AddComponent<Camera>(); copy.enabled = false;
-        }
+        EnsureCameraCopy();
         for (int i = 0; i < 2; i++)
         {
             stage[i] = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32) { name = "SmokescreenStage" + i, hideFlags = HideFlags.DontUnloadUnusedAsset, antiAliasing = 1 };
@@ -420,6 +417,61 @@ internal static class OverlayContent
             stage[i].Create();
         }
         fullCpu = Cpu(w, h);
+    }
+    private static void EnsureCameraCopy()
+    {
+        if (RenderState.Alive(copy)) return;
+        var go = new GameObject("SmokescreenPrivateCamera");
+        UnityEngine.Object.DontDestroyOnLoad(go);
+        copy = go.AddComponent<Camera>();
+        copy.enabled = false;
+    }
+
+    private static RenderTexture replayTarget;
+    private static Texture2D replayCpu;
+
+    private static void CaptureDelayed()
+    {
+        var old = RenderTexture.active;
+        try
+        {
+            if (Screen.width < 1 || Screen.height < 1) return;
+            float scale = Math.Min((float)DelayedRecording.MaxWidth / Screen.width, (float)DelayedRecording.MaxHeight / Screen.height);
+            int w = Math.Max(1, (int)(Screen.width * scale)), h = Math.Max(1, (int)(Screen.height * scale));
+            if (!RenderState.Alive(replayTarget) || replayTarget.width != w || replayTarget.height != h)
+            {
+                ReleaseReplay();
+                replayTarget = new RenderTexture(w, h, 24, RenderTextureFormat.ARGB32)
+                    { name = "SmokescreenReplay", hideFlags = HideFlags.DontUnloadUnusedAsset };
+                replayTarget.Create();
+                replayCpu = Cpu(w, h);
+            }
+            EnsureCameraCopy();
+            Rendering = true;
+            RenderFull(replayTarget);
+            RenderTexture.active = replayTarget;
+            replayCpu.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
+            var pixels = replayCpu.GetWritableImageData(0);
+            if (pixels != IntPtr.Zero) DelayedRecording.Push(pixels, w, h);
+        }
+        catch (Exception e) { Failed(e); }
+        finally
+        {
+            RenderTexture.active = old;
+            Rendering = false;
+        }
+    }
+
+    internal static void ReleaseReplay()
+    {
+        if (RenderState.Alive(replayTarget))
+        {
+            replayTarget.Release();
+            UnityEngine.Object.Destroy(replayTarget);
+        }
+        if (RenderState.Alive(replayCpu)) UnityEngine.Object.Destroy(replayCpu);
+        replayTarget = null;
+        replayCpu = null;
     }
     private static void EnsureAtlas(int w, int h)
     {
@@ -433,11 +485,13 @@ internal static class OverlayContent
     }
     private static Texture2D Cpu(int w, int h) => new(w,h,TextureFormat.RGBA32,false) { name = "SmokescreenReadback", hideFlags = HideFlags.DontUnloadUnusedAsset };
 
-    private static void Prepare(Camera source, int slot)
+    private static void Prepare(Camera source, int slot) => Prepare(source, stage[slot]);
+
+    private static void Prepare(Camera source, RenderTexture target)
     {
         copy.CopyFrom(source); copy.enabled = false;
         copy.transform.SetPositionAndRotation(source.transform.position, source.transform.rotation);
-        copy.targetTexture = stage[slot];
+        copy.targetTexture = target;
         copy.rect = source.rect;
         copy.ResetAspect();
     }
@@ -493,7 +547,7 @@ internal static class OverlayContent
     }
 
     // Vollbild aller Kameras wie im Spiel (Intro, Meeting, Feed, Diagnose).
-    private static void RenderFull(int slot)
+    private static void RenderFull(RenderTexture target)
     {
         var old = RenderTexture.active;
         try
@@ -511,7 +565,7 @@ internal static class OverlayContent
                     copy.Render();
                     continue;
                 }
-                Prepare(c, slot);
+                Prepare(c, target);
                 if (first && copy.clearFlags != CameraClearFlags.SolidColor && copy.clearFlags != CameraClearFlags.Skybox)
                 {
                     copy.clearFlags = CameraClearFlags.SolidColor; copy.backgroundColor = Color.black;
@@ -663,6 +717,7 @@ internal static class OverlayContent
     {
         Mask.RestoreAll();
         RenderState.ReleaseNeutralMaterials();
+        ReleaseReplay();
         shutdown = true;
         releaseAfterFrame = false;
         CameraMaskScope.Restore();

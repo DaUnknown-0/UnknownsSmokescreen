@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.7";
+    public const string Version = "0.3.0.8";
 
     internal static ManualLogSource Logger;
 
@@ -43,6 +43,17 @@ public class SmokescreenPlugin : BasePlugin
     internal static ConfigEntry<bool> DiagnosticMode;
     internal static ConfigEntry<bool> CrewVision, LeakWatch, PrivateChat, PrivateMeetings, NeutralAudio;
     internal static ConfigEntry<string> LeakAllowlist;
+    internal static ConfigEntry<bool> ObsWatch, ViewerPage, DelayedReplay, ViewerNotice;
+    internal static ConfigEntry<int> ViewerPort;
+    internal static ConfigEntry<ViewerPosition> ViewerNoticePosition;
+    internal static bool FeedUnlocked { get; private set; }
+    internal static bool FeedEnabled => FeedUnlocked && RecordingFeed.Value;
+
+    internal static void SetFeedUnlocked(bool enabled)
+    {
+        FeedUnlocked = enabled && SettingsMenu.PatchedAtStartup;
+        SettingsMenu.OverlayChanged();
+    }
 
     public override void Load()
     {
@@ -67,8 +78,21 @@ public class SmokescreenPlugin : BasePlugin
         PrivateOverlay = Config.Bind("Overlay", "PrivateOverlay", true,
             "Echtes HUD pixelgenau über dem Spiel anzeigen. Erfordert verifiziertes WDA_EXCLUDEFROMCAPTURE (Windows 10 2004 oder neuer).");
         RecordingFeed = Config.Bind("Overlay", "RecordingFeed", false,
-            "Open an extra window with the same content that OBS CAN capture, for a separate local recording you upload later " +
-            "(e.g. OBS plugin Source Record or a second OBS instance). Never put it into the live scene and keep it off the streamed display.");
+            "Erlaubt die manuelle Freigabe des aufnehmbaren Originalfensters für diese Sitzung.");
+        FeedUnlocked = false;
+        ObsWatch = Config.Bind("Capture", "ObsWatch", true, "Warnt privat bei erkannten Aufnahmeprogrammen und Schutzproblemen.");
+        ViewerPage = Config.Bind("Viewers", "BrowserSource", false, "Lokale OBS-Browserquelle mit Auswertung nach Rundenende.");
+        ViewerPort = Config.Bind("Viewers", "Port", ViewerServer.DefaultPort,
+            new ConfigDescription("Port der Browserquelle auf 127.0.0.1. Port 8765 ist reserviert.", new AcceptableValueRange<int>(1024, 65535)));
+        if (ViewerPort.Value == 8765) ViewerPort.Value = ViewerServer.DefaultPort;
+        DelayedReplay = Config.Bind("Capture", "DelayedReplay", false, "Die letzten 30 Sekunden der Originalsicht im Speicher halten. Export erst nach Rundenende.");
+        ViewerNotice = Config.Bind("Viewers", "Explanation", false, "Rollenfreien Hinweis im geschützten Spielfenster anzeigen.");
+        ViewerNoticePosition = Config.Bind("Viewers", "ExplanationPosition", ViewerPosition.Top, "Position des öffentlichen Zuschauerhinweises.");
+        PrivateOverlay.SettingChanged += (_, _) => SettingsMenu.OverlayChanged();
+        RecordingFeed.SettingChanged += (_, _) =>
+        {
+            if (!RecordingFeed.Value) SetFeedUnlocked(false);
+        };
         OverlayHotkey = Config.Bind("Overlay", "ToggleKey", KeyCode.F8, "Privates HUD einblenden oder ausblenden. Die Spielmaskierung bleibt aktiv.");
         MenuHotkey = Config.Bind("General", "MenuKey", KeyCode.F3, "Opens the Smokescreen settings menu (also reachable through the game's options menu).");
         OverlayFps = Config.Bind("Overlay", "FramesPerSecond", 15, new ConfigDescription("Bildrate des privaten HUD, 5 bis 30.", new AcceptableValueRange<int>(5, 30)));
@@ -95,7 +119,7 @@ public class SmokescreenPlugin : BasePlugin
             Logger.LogInfo($"{Name} is disabled in its config, only the settings menu is active.");
             return;
         }
-        OverlayHost.Start(PrivateOverlay.Value, RecordingFeed.Value);
+        OverlayHost.Start(PrivateOverlay.Value, false);
         // Class by class: one patch that does not fit this game or TOR version must not take the others down.
         var harmony = new Harmony(Guid);
         int ok = 0, failed = 0, corePatched = 0;
@@ -122,6 +146,10 @@ public class SmokescreenPlugin : BasePlugin
     public override bool Unload()
     {
         new Harmony(Guid).UnpatchSelf();
+        CaptureWatch.Stop();
+        ViewerServer.Stop();
+        DelayedRecording.Reset();
+        ViewerExplanation.Clear();
         PrivacyNotice.Clear();
         OverlayContent.Dispose();
         Mask.RestoreAll();
@@ -207,12 +235,19 @@ internal static class Shield
 /// <summary>A small German/English text table (the mod follows the game's language).</summary>
 internal static class Texts
 {
+    private static bool german;
+    private static long languageAfter;
+
     private static bool German
     {
         get
         {
-            try { return AmongUs.Data.DataManager.Settings.Language.CurrentLanguage == SupportedLangs.German; }
-            catch { return false; }
+            long now = Environment.TickCount64;
+            if (now < languageAfter) return german;
+            languageAfter = now + 500;
+            try { german = AmongUs.Data.DataManager.Settings.Language.CurrentLanguage == SupportedLangs.German; }
+            catch { german = false; }
+            return german;
         }
     }
 
@@ -278,9 +313,9 @@ internal static class Texts
         ["menu.flashes"] = ("Hide role flashes", "Rollenblitze verbergen"),
         ["menu.flashes.hint"] = ("Hides coloured screen flashes of role abilities from the camera.", "Verbirgt farbige Bildschirmblitze von Rollenfähigkeiten vor der Kamera."),
         ["menu.overlay"] = ("Private HUD", "Privates HUD"),
-        ["menu.overlay.hint"] = ("Shows you the real HUD on top of the game. Windows excludes it from capture, OBS cannot see it.", "Zeigt dir das echte HUD über dem Spiel. Windows schließt es von Aufnahmen aus, OBS sieht es nicht."),
+        ["menu.overlay.hint"] = ("Shows the real HUD in a Windows capture-excluded window. Verify your OBS source under Aufnahme.", "Zeigt das echte HUD in einem von Windows aufnahmegeschützten Fenster. Prüfe deine OBS-Quelle unter Aufnahme."),
         ["menu.feed"] = ("Recording feed", "Aufnahme-Feed"),
-        ["menu.feed.hint"] = ("WARNING: opens a capturable window with your REAL view for a separate local recording. Never add it to a live scene.", "WARNUNG: öffnet ein aufnehmbares Fenster mit deiner ECHTEN Sicht für eine getrennte lokale Aufnahme. Nie in eine Live-Szene aufnehmen."),
+        ["menu.feed.hint"] = ("Allows manual session unlock under Aufnahme. The unlocked feed can reveal your real view.", "Erlaubt die manuelle Sitzungsfreigabe unter Aufnahme. Der freigegebene Feed zeigt die echte Sicht."),
         ["menu.feed.warning"] = ("Recording feed is ON: the feed window shows your real view. Keep it out of every live scene.", "Aufnahme-Feed ist AN: das Feed-Fenster zeigt deine echte Sicht. Aus jeder Live-Szene heraushalten."),
         ["menu.key.overlay"] = ("HUD key", "HUD-Taste"),
         ["menu.key.overlay.hint"] = ("Key that shows or hides the private HUD. Click, then press a key (Esc cancels).", "Taste zum Ein- und Ausblenden des privaten HUD. Klicken, dann Taste drücken (Esc bricht ab)."),
@@ -302,6 +337,89 @@ internal static class Texts
         ["menu.overlay.disabled"] = ("Private HUD: off", "Privates HUD: aus"),
         ["menu.overlay.failed"] = ("Private HUD: not available on this system", "Privates HUD: auf diesem System nicht verfügbar"),
         ["menu.overlay.ok"] = ("Private HUD: capture-protected", "Privates HUD: aufnahmegeschützt"),
+        ["protection.wait"] = ("Protection waiting", "Schutz wartet"),
+        ["protection.mask.ok"] = ("Mask active", "Maske aktiv"),
+        ["protection.mask.check"] = ("Check mask", "Maske prüfen"),
+        ["protection.off"] = ("Protection off", "Schutz aus"),
+        ["protection.restart"] = ("Restart Among Us to load protection", "Among Us neu starten, um den Schutz zu laden"),
+        ["protection.patch"] = ("Patch failed, protection incomplete", "Patchfehler, Schutz unvollständig"),
+        ["protection.streamer"] = ("Streamer Mode off", "Streamer-Modus aus"),
+        ["protection.wait.verified"] = ("Waiting for round, window verified", "Wartet auf Runde, Fenster verifiziert"),
+        ["protection.wait.inactive"] = ("Waiting for round, window inactive", "Wartet auf Runde, Fenster inaktiv"),
+        ["protection.mask.pending"] = ("Mask render unconfirmed", "Maskenrender unbestätigt"),
+        ["protection.hud.off"] = ("Mask active, private HUD off", "Maske aktiv, privates HUD aus"),
+        ["protection.hud.pending"] = ("Mask active, window unconfirmed", "Maske aktiv, Fenster unbestätigt"),
+        ["protection.hud.hidden"] = ("Mask active, private HUD hidden", "Maske aktiv, privates HUD verborgen"),
+        ["protection.hud.paused"] = ("Mask active, private HUD paused", "Maske aktiv, privates HUD pausiert"),
+        ["protection.hud.stale"] = ("Mask active, private frame missing or stale", "Maske aktiv, privates Bild fehlt oder ist veraltet"),
+        ["protection.hud.unavailable"] = ("Private display unavailable", "Private Anzeige nicht verfügbar"),
+        ["protection.vision"] = ("Partial protection, crew vision unconfirmed", "Teilschutz, Crew-Sicht unbestätigt"),
+        ["protection.feed"] = ("Capturable original feed active", "Aufnehmbares Originalfenster aktiv"),
+        ["protection.partial"] = ("Partial protection, check mask options", "Teilschutz, Maskenoptionen prüfen"),
+        ["protection.ready"] = ("Mask and private HUD confirmed, OBS untested", "Maske und privates HUD bestätigt, OBS ungeprüft"),
+        ["protection.leak.failed"] = ("Leak check unavailable", "Leckprüfung gestört"),
+        ["protection.leak.hits"] = ("Possible leaks: {0}", "Leckverdacht: {0}"),
+        ["affinity.Wine"] = ("Private HUD unavailable on Wine or Proton. Use native Windows.", "Privates HUD unter Wine oder Proton nicht unterstützt. Natives Windows verwenden."),
+        ["affinity.VersionQuery"] = ("Windows version check failed (0x{1:X8}). Update Windows and retry.", "Windows-Version nicht ermittelbar (0x{1:X8}). Windows aktualisieren und erneut versuchen."),
+        ["affinity.OldWindows"] = ("Build {0}. Windows 10 2004 or later is required.", "Build {0}. Windows 10 2004 oder neuer nötig."),
+        ["affinity.DwmQuery"] = ("Desktop composition check failed (0x{1:X8}). Sign in locally and retry.", "DWM-Abfrage fehlgeschlagen (0x{1:X8}). Lokal anmelden und erneut versuchen."),
+        ["affinity.NoComposition"] = ("Desktop composition is off. Sign in locally and retry.", "Desktop-Komposition ist aus. Lokal anmelden und erneut versuchen."),
+        ["affinity.WindowClass"] = ("Window class registration failed (Win32 {1}). Retry under Capture.", "Fensterklasse fehlgeschlagen (Win32 {1}). Unter Aufnahme erneut versuchen."),
+        ["affinity.CreateWindow"] = ("Private window creation failed (Win32 {1}). Retry under Capture.", "Privates Fenster fehlt (Win32 {1}). Unter Aufnahme erneut versuchen."),
+        ["affinity.SetAffinity"] = ("Windows rejected capture exclusion (Win32 {1}). Retry under Capture.", "Windows lehnt die Fenstersperre ab (Win32 {1}). Unter Aufnahme erneut versuchen."),
+        ["affinity.ReadAffinity"] = ("Could not verify capture exclusion (Win32 {1}). Retry under Capture.", "Fenstersperre nicht prüfbar (Win32 {1}). Unter Aufnahme erneut versuchen."),
+        ["affinity.WrongAffinity"] = ("Windows returned 0x{2:X} instead of 0x11. Retry under Capture.", "Windows meldet 0x{2:X} statt 0x11. Unter Aufnahme erneut versuchen."),
+        ["affinity.LostRead"] = ("Capture exclusion check stopped working (Win32 {1}). Retry under Capture.", "Prüfung der Fenstersperre ist ausgefallen (Win32 {1}). Unter Aufnahme erneut versuchen."),
+        ["affinity.LostAffinity"] = ("Capture exclusion was lost (0x{2:X}). Retry under Capture.", "Fenstersperre verloren (0x{2:X}). Unter Aufnahme erneut versuchen."),
+        ["affinity.Thread"] = ("Private window stopped (0x{1:X8}). Retry under Capture.", "Privates Fenster ausgefallen (0x{1:X8}). Unter Aufnahme erneut versuchen."),
+        ["affinity.remote"] = ("End Remote Desktop and try at the local console.", "Remote Desktop beenden und am lokalen Gerät erneut versuchen."),
+        ["affinity.vm"] = ("Possible virtual machine. Try on the Windows host.", "Hinweis auf eine virtuelle Maschine. Auf dem Windows-Host prüfen."),
+        ["menu.capture.retry"] = ("Retry private HUD", "Erneut versuchen"),
+        ["menu.capture.retry.hint"] = ("Recreates the private HUD. It stays hidden until Windows verifies capture exclusion.", "Legt das private HUD neu an. Es bleibt bis zur bestätigten Fenstersperre verborgen."),
+        ["menu.capture"] = ("Capture", "Aufnahme"),
+        ["menu.viewers"] = ("Viewers", "Zuschauer"),
+        ["menu.feed.permission"] = ("Allow feed", "Feed erlauben"),
+        ["menu.feed.unlock"] = ("Unlock feed", "Feed freigeben"),
+        ["menu.feed.lock"] = ("Lock feed", "Feed sperren"),
+        ["menu.feed.warning.short"] = ("Feed unlocked. Original view is capturable.", "Aufnahme-Feed frei. Originalsicht aufnehmbar."),
+        ["menu.capture.watch.label"] = ("OBS watcher", "OBS-Wächter"),
+        ["menu.capture.testing"] = ("Testing ...", "Prüfe ..."),
+        ["menu.capture.start"] = ("Start capture test", "Aufnahmetest starten"),
+        ["menu.capture.replay.label"] = ("Buffer replay", "Rückblick puffern"),
+        ["menu.capture.export.label"] = ("Export replay frames", "Rückblick als Bildfolge speichern"),
+        ["menu.capture.excluded"] = ("excluded", "frei"),
+        ["menu.capture.visible"] = ("visible", "sichtbar"),
+        ["menu.capture.untested"] = ("untested", "ungeprüft"),
+        ["menu.viewers.server.label"] = ("OBS browser page", "OBS-Browserseite"),
+        ["menu.viewers.explanation.label"] = ("Viewer message", "Zuschauerhinweis"),
+        ["menu.viewers.top"] = ("Position: Top", "Position: Oben"),
+        ["menu.viewers.bottom"] = ("Position: Bottom", "Position: Unten"),
+        ["capture.test.failed"] = ("Capture test failed.", "Aufnahmetest fehlgeschlagen."),
+        ["capture.test.affinity"] = ("Enable the private HUD and verify capture exclusion first.", "Privates HUD zuerst einschalten und Fenstersperre prüfen."),
+        ["capture.test.foreground"] = ("Keep the game in the foreground during the capture test.", "Spielfenster während des Aufnahmetests im Vordergrund lassen."),
+        ["capture.test.window"] = ("Game window unavailable.", "Spielfenster nicht verfügbar."),
+        ["capture.test.pattern"] = ("Could not show the test pattern.", "Prüfmuster konnte nicht dargestellt werden."),
+        ["capture.test.changed"] = ("Window, position or protection changed during the test.", "Fenster, Position oder Schutz hat sich im Test geändert."),
+        ["capture.watch.protection"] = ("Capture app detected. Round protection is not ready.", "Aufnahmeprogramm erkannt. Der Rundenschutz ist nicht bereit."),
+        ["capture.watch.overlay"] = ("Capture app detected. Private HUD unavailable.", "Aufnahmeprogramm erkannt. Privates HUD derzeit nicht verfügbar."),
+        ["capture.watch.detected"] = ("Capture app detected.", "Aufnahmeprogramm erkannt."),
+        ["capture.watch.feed"] = ("The unlocked recording feed can show your real view.", "Der freigegebene Aufnahme-Feed kann die Originalsicht zeigen."),
+        ["capture.replay.ready"] = ("Replay ready to export", "Rückblick zum Export bereit"),
+        ["capture.replay.saving"] = ("Exporting replay frames", "Bildfolge wird gespeichert"),
+        ["capture.replay.saved"] = ("Saved to BepInEx/SmokescreenReplays/{0}", "Gespeichert in BepInEx/SmokescreenReplays/{0}"),
+        ["capture.replay.failed"] = ("Replay export failed", "Bildexport fehlgeschlagen"),
+        ["menu.capture.watch"] = ("Warns privately when known capture software and a protection issue are detected.", "Warnt privat bei erkannten Aufnahmeprogrammen und Schutzproblemen."),
+        ["menu.capture.test"] = ("Tests GDI, Desktop Duplication and Windows Graphics Capture on this monitor.", "Prüft GDI, Desktop Duplication und Windows Graphics Capture auf diesem Monitor."),
+        ["menu.capture.result"] = ("Green applies to the tested monitor method. Verify Game Capture and Window Capture in your OBS scene.", "Grün gilt für den getesteten Bildschirmweg. Spiel- und Fensteraufnahme in der OBS-Szene prüfen."),
+        ["menu.capture.unlock"] = ("First allow the feed under General. Unlock makes the real view capturable until you lock it or quit.", "Zuerst den Feed unter Allgemein erlauben. Die Freigabe macht die echte Sicht bis zur Sperre oder zum Beenden aufnehmbar."),
+        ["menu.capture.replay"] = ("Keeps up to 30 seconds of the real camera view in memory in protected rounds.", "Hält bis zu 30 Sekunden der echten Kamerasicht in geschützten Runden im Speicher."),
+        ["menu.capture.export"] = ("After the result screen, saves images and a player under BepInEx/SmokescreenReplays.", "Speichert nach dem Ergebnis Bilder und Player unter BepInEx/SmokescreenReplays."),
+        ["menu.viewers.server"] = ("Add this address as an OBS Browser Source. The page shows names and roles after the round.", "Diese Adresse als OBS-Browserquelle eintragen. Nach Rundenende erscheinen Namen und Rollen."),
+        ["menu.viewers.port"] = ("Click plus or minus to change the local port. Hold Shift for steps of 100.", "Plus oder Minus ändert den lokalen Port. Umschalt wechselt in Hunderterschritte."),
+        ["menu.viewers.explanation"] = ("Shows a public explanation of the Crewmate display during protected rounds.", "Erklärt Zuschauern in geschützten Runden die feste Crewmate-Anzeige."),
+        ["menu.viewers.position"] = ("Moves the public explanation to the top or bottom of the game window.", "Platziert die Zuschauer-Erklärung oben oder unten im Spielfenster."),
+        ["viewers.explain.buttons"] = ("Crewmate display and hidden abilities for the stream. Roles revealed after the round.", "Crewmate-Anzeige und verborgene Fähigkeiten für den Stream. Auflösung nach der Runde."),
+        ["viewers.explain.role"] = ("Crewmate display for the stream. Roles revealed after the round.", "Crewmate-Anzeige für den Stream. Auflösung nach der Runde."),
     };
 
     public static string T(string key)
@@ -309,6 +427,8 @@ internal static class Texts
         if (!table.TryGetValue(key, out var v)) return key;
         return German ? v.de : v.en;
     }
+
+    internal static string F(string key, params object[] values) => string.Format(T(key), values);
 }
 
 /// <summary>Version line in the PingTracker corner (shared "Unknown's Collective" block).</summary>

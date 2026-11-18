@@ -17,9 +17,11 @@ internal static class OverlayHost
     private static Thread thread;
     private static volatile bool running, show, feedActive, protectedWindow;
     internal static volatile bool ProtectionFailed;
+    internal static volatile WindowProtection.Failure AffinityFailure;
     internal static volatile bool DiagnosticCapture;
     private static bool wantPrivate, wantRecording;
     private static IntPtr priv, rec, game;
+    private static WindowProtection.SystemInfo windowSystem;
     private static Native.WndProc proc;
     private static readonly Native.EnumProc enumerate = FindCandidate;
     private static readonly StringBuilder className = new(256);
@@ -42,8 +44,11 @@ internal static class OverlayHost
 
     internal static void Start(bool privateOverlay, bool recordingFeed)
     {
-        if (thread != null || (!privateOverlay && !recordingFeed)) return;
+        if (thread is { IsAlive: false }) thread = null;
+        if (thread != null) return;
         ProtectionFailed = false;
+        AffinityFailure = null;
+        if (!privateOverlay && !recordingFeed) return;
         wantPrivate = privateOverlay; wantRecording = recordingFeed; running = true;
         // Eine alte Testdatei wird absichtlich nie ausgewertet.
         foreach (var arg in NativeArguments.Values)
@@ -58,6 +63,7 @@ internal static class OverlayHost
     internal static void Restart(bool privateOverlay, bool recordingFeed)
     {
         Stop();
+        if (thread != null) return;
         lock (gate)
         {
             epoch++;
@@ -74,7 +80,7 @@ internal static class OverlayHost
         show = feedActive = false; running = false;
         var hwnd = priv != IntPtr.Zero ? priv : rec;
         if (hwnd != IntPtr.Zero) Native.PostMessageW(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero);
-        thread?.Join(2000); thread = null;
+        if (thread == null || thread.Join(2000)) thread = null;
     }
     internal static void EndDiagnostic() { diagnosticDirectory = null; }
 
@@ -163,6 +169,7 @@ internal static class OverlayHost
     }
     internal static void PublishFeed(IntPtr rgba, int w, int h)
     {
+        if (!running || !FeedWanted) return;
         int bytes = checked(w * h * 4);
         byte[] buffer;
         lock (gate) { buffer = feedFill; feedFill = null; }
@@ -281,7 +288,7 @@ internal static class OverlayHost
     {
         byte[] data; int w, h;
         lock (gate) { if (!feedPending) return; feedPending = false; data = feedReady; w = feedWidth; h = feedHeight; }
-        if (rec == IntPtr.Zero || data == null) return;
+        if (!running || rec == IntPtr.Zero || data == null) return;
         if (truth == null || truth.Length != data.Length) truth = new byte[data.Length];
         unsafe
         {
@@ -305,6 +312,7 @@ internal static class OverlayHost
     private static void Present(int x0, int y0, int x1, int y1)
     {
         if (!shown || surface == null) { needFull = true; return; }
+        if (!VerifyRuntime()) return;
         if (!Native.GetClientRect(game, out var rc)) return;
         var origin = new Native.POINT(); Native.ClientToScreen(game, ref origin);
         if (rc.right - rc.left != surface.Width || rc.bottom - rc.top != surface.Height) { Hide(); return; }
@@ -346,13 +354,70 @@ internal static class OverlayHost
         if(className.ToString()!="UnityWndClass") return true;
         game=hwnd; return false;
     }
-    private static bool SupportedProtection()
+    internal static bool SupportedProtection() => WindowProtection.CheckSystem(WindowProtection.Inspect(false)) == WindowProtection.Problem.None;
+    internal static bool IsCaptureExcluded(IntPtr hwnd) => hwnd != IntPtr.Zero
+        && Native.GetWindowDisplayAffinity(hwnd, out uint affinity) && affinity == Native.WDA_EXCLUDEFROMCAPTURE;
+    private static void FailProtection(WindowProtection.Problem cause, int code, uint affinity, WindowProtection.SystemInfo system, Exception exception = null)
     {
-        var v=new Native.OSVERSION { size=Marshal.SizeOf<Native.OSVERSION>() };
-        return Native.RtlGetVersion(ref v)==0 && (v.major>10 || (v.major==10 && v.build>=19041))
-            && Native.DwmIsCompositionEnabled(out bool enabled)==0 && enabled;
+        protectedWindow = false;
+        Hide();
+        var failure = new WindowProtection.Failure(cause, code, affinity, system, DateTimeOffset.UtcNow,
+            exception == null ? null : exception.GetType().Name + ": " + exception.Message);
+        AffinityFailure = failure;
+        ProtectionFailed = true;
+        SmokescreenPlugin.Logger.LogWarning(failure.Log);
     }
-    private static bool Verify() => priv!=IntPtr.Zero && Native.GetWindowDisplayAffinity(priv,out uint affinity) && affinity==Native.WDA_EXCLUDEFROMCAPTURE;
+
+    private static bool VerifyRuntime()
+    {
+        if (!protectedWindow) return false;
+        bool read = Native.GetWindowDisplayAffinity(priv, out uint affinity);
+        int error = read ? 0 : Marshal.GetLastWin32Error();
+        var issue = WindowProtection.CheckRead(read, affinity, true);
+        if (issue == WindowProtection.Problem.None) return true;
+        protectedWindow = false;
+        Hide();
+        FailProtection(issue, error, affinity, WindowProtection.RefreshSession(windowSystem));
+        return false;
+    }
+
+    private static void ProtectWindow(string cls, IntPtr instance)
+    {
+        var system = windowSystem = WindowProtection.Inspect(true);
+        var issue = WindowProtection.CheckSystem(system);
+        if (issue != WindowProtection.Problem.None)
+        {
+            FailProtection(issue, issue == WindowProtection.Problem.VersionQuery ? system.VersionStatus : system.DwmStatus, 0, system);
+            return;
+        }
+        priv = Native.CreateWindowExW(CapturePopup.Styles, cls, "Smokescreen Private HUD", Native.WS_POPUP,
+            0, 0, 16, 16, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
+        if (priv == IntPtr.Zero)
+        {
+            FailProtection(WindowProtection.Problem.CreateWindow, Marshal.GetLastWin32Error(), 0, system);
+            return;
+        }
+        if (!Native.SetWindowDisplayAffinity(priv, Native.WDA_EXCLUDEFROMCAPTURE))
+        {
+            FailProtection(WindowProtection.Problem.SetAffinity, Marshal.GetLastWin32Error(), 0, system);
+        }
+        else
+        {
+            bool read = Native.GetWindowDisplayAffinity(priv, out uint affinity);
+            int error = read ? 0 : Marshal.GetLastWin32Error();
+            issue = WindowProtection.CheckRead(read, affinity, false);
+            if (issue == WindowProtection.Problem.None)
+            {
+                surface = new LayerSurface();
+                protectedWindow = true;
+                SmokescreenPlugin.Logger.LogInfo($"Privates HUD: WDA_EXCLUDEFROMCAPTURE bestätigt (0x{affinity:X}), {system.Log}");
+                return;
+            }
+            FailProtection(issue, error, affinity, system);
+        }
+        Native.DestroyWindow(priv);
+        priv = IntPtr.Zero;
+    }
     private static void Run()
     {
         IntPtr instance=Native.GetModuleHandleW(null);
@@ -361,16 +426,15 @@ internal static class OverlayHost
         {
             proc=WindowProc;
             var wc=new Native.WNDCLASSEXW { cbSize=(uint)Marshal.SizeOf<Native.WNDCLASSEXW>(), lpfnWndProc=Marshal.GetFunctionPointerForDelegate(proc), hInstance=instance, lpszClassName=cls };
-            if(Native.RegisterClassExW(ref wc)==0) throw new InvalidOperationException("Fensterklasse nicht registriert");
-            Native.EnumWindows(enumerate,IntPtr.Zero);
-            if(wantPrivate)
+            if (Native.RegisterClassExW(ref wc) == 0)
             {
-                priv=Native.CreateWindowExW(Native.WS_EX_LAYERED|Native.WS_EX_TRANSPARENT|Native.WS_EX_TOPMOST|Native.WS_EX_TOOLWINDOW|Native.WS_EX_NOACTIVATE,
-                    cls,"Smokescreen Private HUD",Native.WS_POPUP,0,0,16,16,IntPtr.Zero,IntPtr.Zero,instance,IntPtr.Zero);
-                protectedWindow=priv!=IntPtr.Zero && SupportedProtection() && Native.SetWindowDisplayAffinity(priv,Native.WDA_EXCLUDEFROMCAPTURE) && Verify();
-                if(!protectedWindow) { ProtectionFailed=true; if(priv!=IntPtr.Zero) Native.DestroyWindow(priv); priv=IntPtr.Zero; }
-                else { surface=new LayerSurface(); SmokescreenPlugin.Logger.LogInfo("Privates HUD: WDA_EXCLUDEFROMCAPTURE gesetzt und verifiziert"); }
+                int error = Marshal.GetLastWin32Error();
+                if (wantPrivate) FailProtection(WindowProtection.Problem.WindowClass, error, 0, WindowProtection.Inspect(true));
+                else SmokescreenPlugin.Logger.LogWarning("Fensterklasse nicht registriert: Win32=" + error);
+                return;
             }
+            Native.EnumWindows(enumerate,IntPtr.Zero);
+            if (wantPrivate) ProtectWindow(cls, instance);
             if(wantRecording)
             {
                 // Absichtlich verborgen. Benutzer öffnet die Aufnahmequelle separat, nie automatisch über dem Spiel.
@@ -383,7 +447,11 @@ internal static class OverlayHost
             Native.SetTimer(host,(UIntPtr)1,16,IntPtr.Zero);
             while(running && Native.GetMessageW(out var message,IntPtr.Zero,0,0)>0) { Native.TranslateMessage(ref message); Native.DispatchMessageW(ref message); }
         }
-        catch(Exception e) { ProtectionFailed=wantPrivate; SmokescreenPlugin.Logger.LogWarning("HUD-Fenster: "+e.Message); }
+        catch (Exception e)
+        {
+            if (wantPrivate) FailProtection(WindowProtection.Problem.Thread, e.HResult, 0, windowSystem, e);
+            else SmokescreenPlugin.Logger.LogWarning("HUD-Fenster: " + e.Message);
+        }
         finally
         {
             protectedWindow=false;
@@ -407,23 +475,27 @@ internal static class OverlayHost
             if(msg==Native.WM_PAINT && hwnd==rec)
             {
                 var ps=new Native.PAINTSTRUCT(); var dc=Native.BeginPaint(hwnd,ref ps);
-                try { recording?.Blit(dc, hwnd); } finally { Native.EndPaint(hwnd,ref ps); }
+                try { if (running) recording?.Blit(dc, hwnd); } finally { Native.EndPaint(hwnd,ref ps); }
                 return IntPtr.Zero;
             }
             if(msg==Native.WM_CLOSE) { if(!running) Native.PostQuitMessage(0); else Native.ShowWindow(hwnd,0); return IntPtr.Zero; }
         }
-        catch(Exception e) { Hide(); SmokescreenPlugin.Logger.LogWarning("HUD-Ausgabe: "+e.Message); }
+        catch (Exception e)
+        {
+            if (wantPrivate && !ProtectionFailed)
+                FailProtection(WindowProtection.Problem.Thread, e.HResult, 0, windowSystem, e);
+            else SmokescreenPlugin.Logger.LogWarning("HUD-Ausgabe: " + e.Message);
+        }
         return Native.DefWindowProcW(hwnd,msg,w,l);
     }
     private static void Tick()
     {
+        bool safe = VerifyRuntime();
         ProcessCapture();
         ProcessPositions();
         ProcessFeed();
         if(game==IntPtr.Zero || !Native.IsWindow(game)) Native.EnumWindows(enumerate,IntPtr.Zero);
         if(priv==IntPtr.Zero) return;
-        bool safe=protectedWindow && Verify();
-        if(protectedWindow && !safe) { protectedWindow=false; ProtectionFailed=true; }
         // Kein Freilegen des Fake-Bilds bei kurzen Renderpausen. Freigabe am Frameende.
         bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && hasContent && surface!=null && surface.Width>0;
         if(!visible) { Hide(); return; }
@@ -442,11 +514,12 @@ internal static class OverlayHost
     }
 
     // Persistente DIB, in die der Komponist direkt schreibt.
-    private sealed unsafe class LayerSurface : IDisposable
+    internal sealed unsafe class LayerSurface : IDisposable
     {
         private IntPtr dc,bmp,previous,bits;
         internal int Width, Height;
         internal uint* Bits => (uint*)bits;
+        internal IntPtr Dc => dc;
         internal bool Ensure(int w,int h)
         {
             if(dc==IntPtr.Zero) dc=Native.CreateCompatibleDC(IntPtr.Zero);
@@ -514,7 +587,7 @@ internal static class Native
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassNameW(IntPtr hwnd, StringBuilder text, int count);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool GetWindowDisplayAffinity(IntPtr hwnd, out uint affinity);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern void PostQuitMessage(int exit);
     [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
@@ -596,7 +669,7 @@ internal static class Native
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr GetModuleHandleW(string name);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern ushort RegisterClassExW(ref WNDCLASSEXW wc);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern bool UnregisterClassW(string cls, IntPtr instance);
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr CreateWindowExW(uint exStyle, string cls, string title, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr inst, IntPtr param);
@@ -612,7 +685,7 @@ internal static class Native
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rc);
     [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT p);
-    [DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowDisplayAffinity(IntPtr hwnd, uint affinity);
     [DllImport("user32.dll")] public static extern unsafe bool UpdateLayeredWindowIndirect(IntPtr hwnd, ULWINFO* info);
     [DllImport("user32.dll")] public static extern bool InvalidateRect(IntPtr hwnd, IntPtr rect, bool erase);
     [DllImport("user32.dll")] public static extern IntPtr BeginPaint(IntPtr hwnd, ref PAINTSTRUCT ps);

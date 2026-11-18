@@ -118,6 +118,18 @@ internal static class IntroEnd
 }
 
 // Ergebnisbild gehoert unveraendert dem Spiel und TOR, auch bei einem Wechsel im Renderframe.
+[HarmonyPatch(typeof(AmongUsClient), nameof(AmongUsClient.OnGameEnd))]
+internal static class RoundEnding
+{
+    public static void Prefix() => RoundOutputs.MarkEnding();
+}
+
+[HarmonyPatch(typeof(LobbyBehaviour), nameof(LobbyBehaviour.Start))]
+internal static class RoundAborted
+{
+    public static void Postfix() => RoundOutputs.Abort();
+}
+
 [HarmonyPatch(typeof(EndGameManager), nameof(EndGameManager.SetEverythingUp))]
 internal static class ResultScreen
 {
@@ -128,6 +140,7 @@ internal static class ResultScreen
         Shield.ResultScreen = true;
         Shield.Invalidate();
         OverlayContent.Reset();
+        RoundOutputs.Finish();
     }
 }
 
@@ -141,7 +154,11 @@ internal static class IntroPlayerCreated
 internal static class IntroReset
 {
     [HarmonyPriority(Priority.First)]
-    public static void Prefix() => IntroPrivacy.Reset();
+    public static void Prefix()
+    {
+        RoundOutputs.Begin();
+        IntroPrivacy.Reset();
+    }
 }
 
 // TOR fuehrt Rollenlogik in diesen Updates aus. Auch bei ausbleibendem Frameende

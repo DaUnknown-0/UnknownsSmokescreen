@@ -40,6 +40,7 @@ internal static class HudNotice
     internal static string Append(string text)
     {
         if (OverlayHost.ProtectionFailed && !seen) { seen = true; until = Time.realtimeSinceStartup + 8f; }
-        return seen && Time.realtimeSinceStartup < until ? text + "\n<size=65%><color=#B4BCC8>Anzeige nicht verfügbar</color></size>" : text;
+        return seen && Time.realtimeSinceStartup < until
+            ? text + "\n<size=65%><color=#B4BCC8>" + Texts.T("protection.hud.unavailable") + "</color></size>" : text;
     }
 }

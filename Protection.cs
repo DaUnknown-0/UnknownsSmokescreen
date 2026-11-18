@@ -11,37 +11,39 @@ internal static class Protection
     private static float maskAt = -100;
     private static bool crewRendered;
     private static bool MaskFresh => Time.realtimeSinceStartup - maskAt < 1f;
+    internal static bool MaskConfirmed => PatchesReady && MaskFresh;
     internal static void ConfirmMask()
     {
         maskAt = Time.realtimeSinceStartup;
         crewRendered = SmokescreenPlugin.CrewVision.Value && VisionMask.Ready;
     }
     internal static void InvalidateMask() => maskAt = -100;
-    internal static string PublicStatus => !Shield.Active ? "Schutz wartet" : PatchesReady && MaskFresh ? "Maske aktiv" : "Maske prüfen";
+    internal static string PublicStatus => Texts.T(!Shield.Active ? "protection.wait" : MaskConfirmed ? "protection.mask.ok" : "protection.mask.check");
     internal static string Details
     {
         get
         {
-            if (!SmokescreenPlugin.Enabled.Value) return "Schutz aus";
-            if (!SettingsMenu.PatchedAtStartup) return "Neustart erforderlich";
-            if (!PatchesReady) return "Patchfehler, Schutz unvollständig";
-            if (!Shield.Wanted) return "Streamer-Modus aus";
-            if (!Shield.Active) return "Wartet auf Runde, " + (OverlayHost.Verified ? "Fenster verifiziert" : "Fenster inaktiv");
-            if (!MaskFresh) return "Maskenrender unbestätigt";
-            if (!SmokescreenPlugin.PrivateOverlay.Value) return "Maske aktiv, privates HUD aus";
-            if (OverlayHost.ProtectionFailed) return "Maske aktiv, Fenstersperre fehlgeschlagen";
-            if (!OverlayHost.Verified) return "Maske aktiv, Fenster unbestätigt";
-            if (OverlayHost.HiddenByUser) return "Maske aktiv, privates HUD verborgen";
-            if (!OverlayHost.GameForeground) return "Maske aktiv, privates HUD pausiert";
+            if (!SmokescreenPlugin.Enabled.Value) return Texts.T("protection.off");
+            if (!SettingsMenu.PatchedAtStartup) return Texts.T("protection.restart");
+            if (!PatchesReady) return Texts.T("protection.patch");
+            if (SmokescreenPlugin.PrivateOverlay.Value && OverlayHost.AffinityFailure is { } failure)
+                return (Shield.Active && MaskFresh ? Texts.T("protection.mask.ok") + " · " : "") + failure.Description;
+            if (!Shield.Wanted) return Texts.T("protection.streamer");
+            if (!Shield.Active) return Texts.T(OverlayHost.Verified ? "protection.wait.verified" : "protection.wait.inactive");
+            if (!MaskFresh) return Texts.T("protection.mask.pending");
+            if (!SmokescreenPlugin.PrivateOverlay.Value) return Texts.T("protection.hud.off");
+            if (!OverlayHost.Verified) return Texts.T("protection.hud.pending");
+            if (OverlayHost.HiddenByUser) return Texts.T("protection.hud.hidden");
+            if (!OverlayHost.GameForeground) return Texts.T("protection.hud.paused");
             if (Environment.TickCount64 - OverlayHost.LastCapture > 1500 || !OverlayHost.Shown)
-                return "Maske aktiv, privates Bild fehlt oder ist veraltet";
-            if (SmokescreenPlugin.CrewVision.Value && !crewRendered) return "Teilschutz, Crew-Sicht unbestätigt";
-            if (OverlayHost.FeedWanted) return "Aufnehmbares Originalfenster aktiv";
+                return Texts.T("protection.hud.stale");
+            if (SmokescreenPlugin.CrewVision.Value && !crewRendered) return Texts.T("protection.vision");
+            if (OverlayHost.FeedWanted) return Texts.T("protection.feed");
             if (!SmokescreenPlugin.HideButtons.Value || !SmokescreenPlugin.HideFlashes.Value
                 || !SmokescreenPlugin.PrivateChat.Value || !SmokescreenPlugin.PrivateMeetings.Value
                 || !SmokescreenPlugin.NeutralAudio.Value)
-                return "Teilschutz, Maskenoptionen prüfen";
-            return "Maske und privates HUD bestätigt, OBS ungeprüft";
+                return Texts.T("protection.partial");
+            return Texts.T("protection.ready");
         }
     }
 }
@@ -88,8 +90,8 @@ internal static class PrivacyNotice
         var message = Protection.Details;
         if (SmokescreenPlugin.LeakWatch.Value)
         {
-            if (LeakGuard.Failed) message += " | Leckprüfung gestört";
-            else if (LeakGuard.Hits > 0) message += " | Leckverdacht: " + LeakGuard.Hits;
+            if (LeakGuard.Failed) message += " | " + Texts.T("protection.leak.failed");
+            else if (LeakGuard.Hits > 0) message += " | " + Texts.F("protection.leak.hits", LeakGuard.Hits);
         }
         if (Text.text != message) Text.text = message;
         var color = SmokescreenPlugin.LeakWatch.Value && (LeakGuard.Failed || LeakGuard.Hits > 0)
