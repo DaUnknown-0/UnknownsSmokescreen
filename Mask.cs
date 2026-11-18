@@ -39,6 +39,10 @@ public class SmokescreenRunner : MonoBehaviour
     // Sicherheitsnetz, falls Unity bei Minimieren keinen EndOfFrame ausfuehrt.
     private void Update() => CameraMaskScope.Restore();
     private void FixedUpdate() => CameraMaskScope.Restore();
+    private void OnApplicationFocus(bool focused)
+    {
+        if (!focused) OverlayContent.CancelHold();
+    }
 
     private void OnApplicationQuit() => Shutdown();
     private void OnDestroy() => Shutdown();
@@ -185,6 +189,7 @@ internal static class Mask
         MaskSabotageMap();
         MaskIntro();
         PrivateUi.Apply();
+        PrivateVisuals.Apply();
     }
 
     // --- names ----------------------------------------------------------------------------------------

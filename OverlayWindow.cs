@@ -26,7 +26,7 @@ internal static class OverlayHost
     private static readonly Native.EnumProc enumerate = FindCandidate;
     private static readonly StringBuilder className = new(256);
     private static readonly uint pid = (uint)Environment.ProcessId;
-    private const uint WM_POSITIONS = 0x8001, WM_CAPTURE = 0x8002, WM_FEED = 0x8003;
+    private const uint WM_POSITIONS = 0x8001, WM_CAPTURE = 0x8002, WM_FEED = 0x8003, WM_VISIBILITY = 0x8004;
     private static string diagnosticDirectory;
     private static long diagnosticDeadline;
     private static int dumpCount;
@@ -40,7 +40,18 @@ internal static class OverlayHost
     internal static bool HiddenByUser => !show;
     internal static bool FeedWanted => wantRecording && feedActive;
     internal static string DiagnosticDirectory => diagnosticDirectory != null && Environment.TickCount64 <= diagnosticDeadline ? diagnosticDirectory : null;
-    internal static void SetVisible(bool value, bool record = false) { show = value; feedActive = record; }
+    internal static void SetVisible(bool value, bool record = false)
+    {
+        if (value) show = true;
+        else HidePrivate();
+        feedActive = record;
+    }
+    internal static void HidePrivate()
+    {
+        if (!show) return;
+        show = false;
+        Post(WM_VISIBILITY);
+    }
 
     internal static void Start(bool privateOverlay, bool recordingFeed)
     {
@@ -48,8 +59,10 @@ internal static class OverlayHost
         if (thread != null) return;
         ProtectionFailed = false;
         AffinityFailure = null;
+        wantPrivate = privateOverlay; wantRecording = recordingFeed;
         if (!privateOverlay && !recordingFeed) return;
-        wantPrivate = privateOverlay; wantRecording = recordingFeed; running = true;
+        running = true;
+        clientArea = default;
         // Eine alte Testdatei wird absichtlich nie ausgewertet.
         foreach (var arg in NativeArguments.Values)
             if (arg.StartsWith("--smokescreen-dump=", StringComparison.Ordinal))
@@ -90,7 +103,7 @@ internal static class OverlayHost
     {
         internal byte[] Atlas = Array.Empty<byte>();
         internal IslandDesc[] Islands = new IslandDesc[64];
-        internal int Stride, AtlasWidth, AtlasHeight, Width, Height, Count, Epoch;
+        internal int Stride, AtlasWidth, AtlasHeight, Width, Height, Count, Epoch, Geometry;
         internal float Ortho;
         internal long CapturedAt;
         internal bool Empty;
@@ -120,12 +133,13 @@ internal static class OverlayHost
         return oldest;
     }
     private static bool positionsPending;
+    private static int incomingGeometry;
     private static int postedPositions, postedCapture;
     private static byte[] feedFill, feedReady;
     private static int feedWidth, feedHeight;
     private static bool feedPending;
 
-    internal static CaptureSet BeginCapture(int w, int h, int atlasWidth, int atlasHeight)
+    internal static CaptureSet BeginCapture(int w, int h, int atlasWidth, int atlasHeight, int geometry)
     {
         CaptureSet set;
         lock (gate)
@@ -137,6 +151,7 @@ internal static class OverlayHost
         int bytes = checked(atlasWidth * atlasHeight * 4);
         if (set.Atlas.Length < bytes) set.Atlas = new byte[bytes];
         set.Width = w; set.Height = h; set.AtlasWidth = atlasWidth; set.AtlasHeight = atlasHeight;
+        set.Geometry = geometry;
         set.Stride = atlasWidth * 4; set.Count = 0; set.Empty = false; set.Ortho = 0;
         set.CapturedAt = Environment.TickCount64;
         return set;
@@ -150,20 +165,20 @@ internal static class OverlayHost
         lock (gate) { set.Epoch = epoch; if (pending != null) free.Push(pending); pending = set; }
         if (Interlocked.Exchange(ref postedCapture, 1) == 0) Post(WM_CAPTURE);
     }
-    internal static void PublishEmpty(int w, int h)
+    internal static void PublishEmpty(int w, int h, int geometry)
     {
-        var set = BeginCapture(w, h, 0, 0);
+        var set = BeginCapture(w, h, 0, 0, geometry);
         if (set == null) return;
         set.Empty = true;
         CommitCapture(set);
     }
-    internal static void PublishPositions(AnchorPositions positions)
+    internal static void PublishPositions(AnchorPositions positions, int geometry)
     {
         lock (gate)
         {
             // Eine noch nicht verarbeitete Diagnoseprobe wird nicht von einem spaeteren Frame ueberschrieben.
             if (positionsPending && incoming.Probe != null) return;
-            incoming.CopyFrom(positions); positionsPending = true;
+            incoming.CopyFrom(positions); incomingGeometry = geometry; positionsPending = true;
         }
         if (Interlocked.Exchange(ref postedPositions, 1) == 0) Post(WM_POSITIONS);
     }
@@ -197,6 +212,11 @@ internal static class OverlayHost
     // --- Fensterthread ------------------------------------------------------------------------------
 
     private static LayerSurface surface;
+    private static LayerSurface scaledSurface;
+    private static DesktopDisplay.ClientArea clientArea;
+    private static bool layoutChanged;
+    private static int geometryVersion, contentEpoch;
+    internal static int GeometryVersion => Volatile.Read(ref geometryVersion);
     private static FeedSurface recording;
     private static readonly Composer composer = new();
     private static Island[] poolA = new Island[0], poolB = new Island[0];
@@ -216,13 +236,16 @@ internal static class OverlayHost
         lock (gate) { set = pending; pending = null; clear = clearRequested; clearRequested = false; }
         if (clear)
         {
-            composer.Clear(); hasContent = false; needFull = true;
+            Hide();
+            composer.Clear(); hasContent = false;
+            historyCount = historyNext = current.Count = 0;
+            current.Probe = null; current.Ortho = 0; current.BlockWorld = false;
             Interlocked.Exchange(ref lastCaptureAt, 0);
         }
         if (set == null) return;
         try
         {
-            if (set.Epoch != epoch || surface == null) return;
+            if (set.Epoch != Volatile.Read(ref epoch) || set.Geometry != GeometryVersion || surface == null) return;
             long start = Stopwatch.GetTimestamp();
             if (surface.Ensure(set.Width, set.Height)) { composer.Attach(surface.Bits, set.Width, set.Height); needFull = true; }
             var pool = usePoolA ? poolA : poolB;
@@ -249,6 +272,7 @@ internal static class OverlayHost
             }
             buildTicks += Stopwatch.GetTimestamp() - start;
             hasContent = true;
+            contentEpoch = set.Epoch;
             Interlocked.Exchange(ref lastCaptureAt, set.CapturedAt);
             if (composer.Replace(pool, n, set.Ortho, Delayed(current.Delay), out int x0, out int y0, out int x1, out int y1, current.BlockWorld)) Present(x0, y0, x1, y1);
             captures++; captureTicks += Stopwatch.GetTimestamp() - start;
@@ -260,7 +284,13 @@ internal static class OverlayHost
     private static void ProcessPositions()
     {
         Interlocked.Exchange(ref postedPositions, 0);
-        lock (gate) { if (!positionsPending) return; current.CopyFrom(incoming); positionsPending = false; }
+        lock (gate)
+        {
+            if (!positionsPending) return;
+            positionsPending = false;
+            if (incomingGeometry != GeometryVersion) return;
+            current.CopyFrom(incoming);
+        }
         history[historyNext].CopyFrom(current); historyNext = (historyNext + 1) % history.Length; historyCount = Math.Min(historyCount + 1, history.Length);
         long start = Stopwatch.GetTimestamp();
         var display = Delayed(current.Delay);
@@ -313,13 +343,38 @@ internal static class OverlayHost
     {
         if (!shown || surface == null) { needFull = true; return; }
         if (!VerifyRuntime()) return;
-        if (!Native.GetClientRect(game, out var rc)) return;
-        var origin = new Native.POINT(); Native.ClientToScreen(game, ref origin);
-        if (rc.right - rc.left != surface.Width || rc.bottom - rc.top != surface.Height) { Hide(); return; }
-        bool full = needFull || origin.x != presentedX || origin.y != presentedY || surface.Width != presentedWidth || surface.Height != presentedHeight;
-        if (!surface.Present(priv, origin.x, origin.y, full, x0, y0, x1, y1)) { Hide(); return; }
-        presentedX = origin.x; presentedY = origin.y; presentedWidth = surface.Width; presentedHeight = surface.Height;
+        RefreshGeometry();
+        if (!CanShow()) { Hide(); return; }
+        var area = clientArea;
+        bool full = needFull || area.X != presentedX || area.Y != presentedY || area.Width != presentedWidth || area.Height != presentedHeight;
+        var output = surface;
+        if (surface.Width != area.Width || surface.Height != area.Height)
+        {
+            scaledSurface ??= new LayerSurface();
+            if (!surface.ScaleInto(scaledSurface, area.Width, area.Height)) { Hide(); return; }
+            output = scaledSurface;
+            full = true;
+        }
+        if (!output.Present(priv, area.X, area.Y, full, x0, y0, x1, y1)) { Hide(); return; }
+        presentedX = area.X; presentedY = area.Y; presentedWidth = area.Width; presentedHeight = area.Height;
         needFull = false; presents++;
+    }
+
+    private static bool CanShow() => show && GameForeground && protectedWindow && Native.IsWindowVisible(game)
+        && hasContent && contentEpoch == Volatile.Read(ref epoch) && surface is { Width: > 0 } && clientArea.FitsPixelBudget;
+
+    private static void RefreshGeometry()
+    {
+        var area = DesktopDisplay.Client(game);
+        bool newLayout = layoutChanged || !area.SameLayout(clientArea);
+        layoutChanged = false;
+        clientArea = area;
+        if (!newLayout) return;
+        Hide();
+        Discard();
+        Interlocked.Increment(ref geometryVersion);
+        if (area.Window != IntPtr.Zero)
+            SmokescreenPlugin.Logger.LogInfo($"HUD-Fensterfläche: {area.Width}x{area.Height} bei {area.X},{area.Y}, Fenster-DPI={area.Dpi}, Monitor=0x{area.Monitor:X}");
     }
     private static void Hide()
     {
@@ -381,13 +436,18 @@ internal static class OverlayHost
         return false;
     }
 
-    private static void ProtectWindow(string cls, IntPtr instance)
+    private static void ProtectWindow(string cls, IntPtr instance, bool dpiActive)
     {
         var system = windowSystem = WindowProtection.Inspect(true);
         var issue = WindowProtection.CheckSystem(system);
         if (issue != WindowProtection.Problem.None)
         {
             FailProtection(issue, issue == WindowProtection.Problem.VersionQuery ? system.VersionStatus : system.DwmStatus, 0, system);
+            return;
+        }
+        if (!dpiActive)
+        {
+            FailProtection(WindowProtection.Problem.DpiContext, 0, 0, system);
             return;
         }
         priv = Native.CreateWindowExW(CapturePopup.Styles, cls, "Smokescreen Private HUD", Native.WS_POPUP,
@@ -410,7 +470,7 @@ internal static class OverlayHost
             {
                 surface = new LayerSurface();
                 protectedWindow = true;
-                SmokescreenPlugin.Logger.LogInfo($"Privates HUD: WDA_EXCLUDEFROMCAPTURE bestätigt (0x{affinity:X}), {system.Log}");
+                SmokescreenPlugin.Logger.LogInfo($"Privates HUD: WDA_EXCLUDEFROMCAPTURE bestätigt (0x{affinity:X}), Per-Monitor V2={PerMonitorDpiScope.IsPerMonitorV2(priv)}, {system.Log}");
                 return;
             }
             FailProtection(issue, error, affinity, system);
@@ -420,6 +480,7 @@ internal static class OverlayHost
     }
     private static void Run()
     {
+        using var dpi = PerMonitorDpiScope.Enter();
         IntPtr instance=Native.GetModuleHandleW(null);
         string cls="UnknownsSmokescreenHud"+pid;
         try
@@ -434,7 +495,7 @@ internal static class OverlayHost
                 return;
             }
             Native.EnumWindows(enumerate,IntPtr.Zero);
-            if (wantPrivate) ProtectWindow(cls, instance);
+            if (wantPrivate) ProtectWindow(cls, instance, dpi.Active);
             if(wantRecording)
             {
                 // Absichtlich verborgen. Benutzer öffnet die Aufnahmequelle separat, nie automatisch über dem Spiel.
@@ -459,6 +520,7 @@ internal static class OverlayHost
             if(rec!=IntPtr.Zero) Native.DestroyWindow(rec);
             unsafe { composer.Attach(null,0,0); }
             surface?.Dispose(); recording?.Dispose(); priv=rec=IntPtr.Zero; surface=null; recording=null;
+            scaledSurface?.Dispose(); scaledSurface = null;
             lock(gate) { truth=null; if(pending!=null) free.Push(pending); pending=null; feedFill=feedReady=null; }
             Native.UnregisterClassW(cls,instance);
         }
@@ -470,6 +532,12 @@ internal static class OverlayHost
             if(msg==WM_POSITIONS) { ProcessPositions(); return IntPtr.Zero; }
             if(msg==WM_CAPTURE) { ProcessCapture(); return IntPtr.Zero; }
             if(msg==WM_FEED) { ProcessFeed(); return IntPtr.Zero; }
+            if(msg==WM_VISIBILITY) { if (!show) Hide(); return IntPtr.Zero; }
+            if (hwnd == priv && (msg == Native.WM_DPICHANGED || msg == Native.WM_DISPLAYCHANGE))
+            {
+                layoutChanged = true;
+                return IntPtr.Zero;
+            }
             if(msg==Native.WM_TIMER) { Tick(); return IntPtr.Zero; }
             if(msg==Native.WM_NCHITTEST && hwnd==priv) return (IntPtr)(-1);
             if(msg==Native.WM_PAINT && hwnd==rec)
@@ -491,26 +559,22 @@ internal static class OverlayHost
     private static void Tick()
     {
         bool safe = VerifyRuntime();
+        if(game==IntPtr.Zero || !Native.IsWindow(game)) Native.EnumWindows(enumerate,IntPtr.Zero);
+        if (priv != IntPtr.Zero) RefreshGeometry();
         ProcessCapture();
         ProcessPositions();
         ProcessFeed();
-        if(game==IntPtr.Zero || !Native.IsWindow(game)) Native.EnumWindows(enumerate,IntPtr.Zero);
         if(priv==IntPtr.Zero) return;
         // Kein Freilegen des Fake-Bilds bei kurzen Renderpausen. Freigabe am Frameende.
-        bool visible=show && GameForeground && safe && Native.IsWindowVisible(game) && hasContent && surface!=null && surface.Width>0;
-        if(!visible) { Hide(); return; }
-        if(!Native.GetClientRect(game,out var rc) || rc.right-rc.left!=surface.Width || rc.bottom-rc.top!=surface.Height) { Hide(); return; }
+        if(!safe || !CanShow()) { Hide(); return; }
         if(!shown)
         {
             shown=true; needFull=true;
             Present(0,0,surface.Width,surface.Height);
             if(shown) Native.ShowWindow(priv,4);
         }
-        else
-        {
-            var origin=new Native.POINT(); Native.ClientToScreen(game,ref origin);
-            if(origin.x!=presentedX || origin.y!=presentedY) Present(0,0,surface.Width,surface.Height);
-        }
+        else if (clientArea.X != presentedX || clientArea.Y != presentedY)
+            Present(0, 0, surface.Width, surface.Height);
     }
 
     // Persistente DIB, in die der Komponist direkt schreibt.
@@ -539,6 +603,15 @@ internal static class OverlayHost
             var info=new Native.ULWINFO { cbSize=(uint)sizeof(Native.ULWINFO), pptDst=&dst, psize=&size, hdcSrc=dc, pptSrc=&src, pblend=&blend, dwFlags=Native.ULW_ALPHA, prcDirty=full?null:&dirty };
             Native.GdiFlush();
             return Native.UpdateLayeredWindowIndirect(hwnd,&info);
+        }
+        internal bool ScaleInto(LayerSurface target, int width, int height)
+        {
+            target.Ensure(width, height);
+            Native.GdiFlush();
+            new Span<uint>(target.Bits, width * height).Clear();
+            // AlphaBlend skaliert die vormultiplizierten Pixel auf eine transparente DIB.
+            return Native.AlphaBlend(target.Dc, 0, 0, width, height, Dc, 0, 0, Width, Height,
+                new Native.BLENDFUNCTION { SourceConstantAlpha = 255, AlphaFormat = 1 });
         }
         public void Dispose() { if(bmp!=IntPtr.Zero) { Native.SelectObject(dc,previous); Native.DeleteObject(bmp); } if(dc!=IntPtr.Zero) Native.DeleteDC(dc); dc=bmp=bits=IntPtr.Zero; Width=Height=0; }
     }
@@ -580,6 +653,7 @@ internal static class Native
     public const int CW_USEDEFAULT = unchecked((int)0x80000000);
     public const int SW_HIDE = 0, SW_SHOWNOACTIVATE = 4, SW_MINIMIZE = 6;
     public const uint WM_TIMER = 0x0113, WM_NCHITTEST = 0x0084, WM_PAINT = 0x000F, WM_CLOSE = 0x0010;
+    public const uint WM_DISPLAYCHANGE = 0x007E, WM_DPICHANGED = 0x02E0;
     public const uint WDA_EXCLUDEFROMCAPTURE = 0x11;
     public const uint ULW_ALPHA = 2;
     public delegate bool EnumProc(IntPtr hwnd, IntPtr data);
@@ -593,6 +667,8 @@ internal static class Native
     [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
     [DllImport("gdi32.dll")] public static extern bool StretchBlt(IntPtr target,int x,int y,int w,int h,IntPtr source,int sx,int sy,int sw,int sh,uint op);
     [DllImport("gdi32.dll")] public static extern bool PatBlt(IntPtr target,int x,int y,int w,int h,uint op);
+    [DllImport("msimg32.dll")] public static extern bool AlphaBlend(IntPtr target, int x, int y, int w, int h,
+        IntPtr source, int sx, int sy, int sw, int sh, BLENDFUNCTION blend);
     [DllImport("dwmapi.dll")] public static extern int DwmIsCompositionEnabled(out bool enabled);
     [DllImport("ntdll.dll")] public static extern int RtlGetVersion(ref OSVERSION version);
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

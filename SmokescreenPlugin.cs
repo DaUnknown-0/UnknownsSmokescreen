@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.8";
+    public const string Version = "0.3.0.9";
 
     internal static ManualLogSource Logger;
 
@@ -38,6 +38,10 @@ public class SmokescreenPlugin : BasePlugin
     internal static ConfigEntry<bool> RecordingFeed;
     internal static ConfigEntry<KeyCode> OverlayHotkey;
     internal static ConfigEntry<KeyCode> MenuHotkey;
+    internal static ConfigEntry<KeyCode> ProfileHotkey;
+    internal static ConfigEntry<Profile> ActiveProfile;
+    internal static ConfigEntry<bool> HoldHud, AdaptiveHudRate;
+    internal static ConfigEntry<int> HudBudget;
     internal static ConfigEntry<int> OverlayFps;
     internal static ConfigEntry<int> SyncFrames;
     internal static ConfigEntry<bool> DiagnosticMode;
@@ -47,11 +51,16 @@ public class SmokescreenPlugin : BasePlugin
     internal static ConfigEntry<int> ViewerPort;
     internal static ConfigEntry<ViewerPosition> ViewerNoticePosition;
     internal static bool FeedUnlocked { get; private set; }
-    internal static bool FeedEnabled => FeedUnlocked && RecordingFeed.Value;
+    internal static bool FeedAllowed => RecordingFeed.Value && Profiles.AllowsFeed;
+    internal static bool FeedEnabled => FeedUnlocked && FeedAllowed;
+    internal static bool ViewerPageEnabled => ViewerPage.Value && Profiles.AllowsViewerOutputs;
+    internal static bool ReplayEnabled => DelayedReplay.Value && Profiles.AllowsReplay;
 
     internal static void SetFeedUnlocked(bool enabled)
     {
-        FeedUnlocked = enabled && SettingsMenu.PatchedAtStartup;
+        bool unlocked = enabled && FeedAllowed && SettingsMenu.PatchedAtStartup;
+        if (FeedUnlocked == unlocked) return;
+        FeedUnlocked = unlocked;
         SettingsMenu.OverlayChanged();
     }
 
@@ -95,6 +104,13 @@ public class SmokescreenPlugin : BasePlugin
         };
         OverlayHotkey = Config.Bind("Overlay", "ToggleKey", KeyCode.F8, "Privates HUD einblenden oder ausblenden. Die Spielmaskierung bleibt aktiv.");
         MenuHotkey = Config.Bind("General", "MenuKey", KeyCode.F3, "Opens the Smokescreen settings menu (also reachable through the game's options menu).");
+        ActiveProfile = Config.Bind("Profiles", "Active", Profile.Custom, "Ausgabeprofil: Custom, Live, Recording oder Private.");
+        ProfileHotkey = Config.Bind("Profiles", "SwitchKey", KeyCode.F5, "Ausgabeprofil wechseln.");
+        ActiveProfile.SettingChanged += (_, _) => Profiles.Changed();
+        HoldHud = Config.Bind("Overlay", "HoldKey", false, "Privates HUD nur bei gehaltener HUD-Taste anzeigen.");
+        AdaptiveHudRate = Config.Bind("Overlay", "AdaptiveRate", false, "Private HUD-Rate an die gemessene Last anpassen.");
+        HudBudget = Config.Bind("Overlay", "BudgetTenthsMs", 15,
+            new ConfigDescription("Mittleres Zeitbudget für private HUD-Aufnahmen pro Spielframe in Zehntelmillisekunden (5 bis 50).", new AcceptableValueRange<int>(5, 50)));
         OverlayFps = Config.Bind("Overlay", "FramesPerSecond", 15, new ConfigDescription("Bildrate des privaten HUD, 5 bis 30.", new AcceptableValueRange<int>(5, 30)));
         SyncFrames = Config.Bind("Overlay", "SyncFrames", 1, new ConfigDescription("Frames the game image is shown later than the private HUD. Names and labels that move with players use the position from this many frames ago (0 to 4).", new AcceptableValueRange<int>(0, 4)));
         DiagnosticMode = Config.Bind("Diagnostics", "Enabled", false, "Expliziter Diagnoselauf, maximal 180 Sekunden. Kein Umgehen von Fokus oder Aufnahmeschutz.");
@@ -153,6 +169,7 @@ public class SmokescreenPlugin : BasePlugin
         PrivacyNotice.Clear();
         OverlayContent.Dispose();
         Mask.RestoreAll();
+        PrivateVisuals.Clear();
         OverlayHost.Stop();
         return true;
     }
@@ -372,12 +389,34 @@ internal static class Texts
         ["affinity.LostRead"] = ("Capture exclusion check stopped working (Win32 {1}). Retry under Capture.", "Prüfung der Fenstersperre ist ausgefallen (Win32 {1}). Unter Aufnahme erneut versuchen."),
         ["affinity.LostAffinity"] = ("Capture exclusion was lost (0x{2:X}). Retry under Capture.", "Fenstersperre verloren (0x{2:X}). Unter Aufnahme erneut versuchen."),
         ["affinity.Thread"] = ("Private window stopped (0x{1:X8}). Retry under Capture.", "Privates Fenster ausgefallen (0x{1:X8}). Unter Aufnahme erneut versuchen."),
+        ["affinity.DpiContext"] = ("Per-monitor DPI context unavailable. Retry under Capture.", "DPI-Kontext pro Monitor fehlt. Unter Aufnahme erneut versuchen."),
         ["affinity.remote"] = ("End Remote Desktop and try at the local console.", "Remote Desktop beenden und am lokalen Gerät erneut versuchen."),
         ["affinity.vm"] = ("Possible virtual machine. Try on the Windows host.", "Hinweis auf eine virtuelle Maschine. Auf dem Windows-Host prüfen."),
         ["menu.capture.retry"] = ("Retry private HUD", "Erneut versuchen"),
         ["menu.capture.retry.hint"] = ("Recreates the private HUD. It stays hidden until Windows verifies capture exclusion.", "Legt das private HUD neu an. Es bleibt bis zur bestätigten Fenstersperre verborgen."),
         ["menu.capture"] = ("Capture", "Aufnahme"),
         ["menu.viewers"] = ("Viewers", "Zuschauer"),
+        ["menu.hud"] = ("HUD", "HUD"),
+        ["menu.profile.Custom"] = ("Custom", "Eigene Einstellungen"),
+        ["menu.profile.Live"] = ("Live", "Live"),
+        ["menu.profile.Recording"] = ("Recording only", "Nur Aufnahme"),
+        ["menu.profile.Private"] = ("Private play", "Privat spielen"),
+        ["menu.profile.detail.Custom"] = ("Use configured outputs", "Eingestellte Ausgaben verwenden"),
+        ["menu.profile.detail.Live"] = ("Viewer outputs allowed, feed locked", "Zuschauerausgaben erlaubt, Feed gesperrt"),
+        ["menu.profile.detail.Recording"] = ("Feed can be unlocked, viewers off", "Feed freigebbar, Zuschauerausgaben aus"),
+        ["menu.profile.detail.Private"] = ("Feed, replay and viewer outputs off", "Feed, Rückblick und Zuschauerausgaben aus"),
+        ["menu.profile.hint"] = ("Switches output profile and locks the feed. Mask settings stay in effect.", "Wechselt das Ausgabeprofil und sperrt den Feed. Die Maskeneinstellungen gelten weiter."),
+        ["menu.key.profile"] = ("Profile key", "Profiltaste"),
+        ["menu.key.profile.hint"] = ("Cycles through profiles. Click to bind a key.", "Wechselt zum nächsten Profil. Klicken, um eine Taste zu belegen."),
+        ["menu.hold.on"] = ("HUD key: Hold", "HUD-Taste: Halten"),
+        ["menu.hold.off"] = ("HUD key: Toggle", "HUD-Taste: Schalten"),
+        ["menu.hold.hint"] = ("Hold the HUD key to see private content. Release to hide it.", "HUD-Taste halten, um private Inhalte zu sehen. Loslassen blendet sie aus."),
+        ["menu.adaptive"] = ("Adaptive rate", "Adaptive Rate"),
+        ["menu.adaptive.hint"] = ("Adjust private HUD capture rate within the configured FPS limit.", "Passt die private HUD-Aufnahmerate bis zur eingestellten FPS-Grenze an."),
+        ["menu.budget.value"] = ("{0}.{1} ms", "{0},{1} ms"),
+        ["menu.budget.hint"] = ("Time budget for private HUD captures per game frame. Applies with adaptive rate enabled.", "Zeitbudget für private HUD-Aufnahmen pro Spielframe. Gilt bei adaptiver Rate."),
+        ["menu.rate.effective"] = ("HUD target: {0} fps", "HUD-Ziel: {0} fps"),
+        ["menu.rate.effective.hint"] = ("Current private HUD capture target. Unchanged images can be skipped.", "Aktuelles Aufnahmeziel des privaten HUD. Gleiche Bilder können übersprungen werden."),
         ["menu.feed.permission"] = ("Allow feed", "Feed erlauben"),
         ["menu.feed.unlock"] = ("Unlock feed", "Feed freigeben"),
         ["menu.feed.lock"] = ("Lock feed", "Feed sperren"),

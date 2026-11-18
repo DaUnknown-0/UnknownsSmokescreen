@@ -49,6 +49,8 @@ internal static unsafe class CaptureSelfTest
         last = null;
         test = Task.Factory.StartNew(() =>
         {
+            using var dpi = PerMonitorDpiScope.Enter();
+            if (!dpi.Active) return Unavailable("capture.test.window");
             if (!Center(game, out var point)) return Unavailable("capture.test.window");
             var report = ProbeAt(point.x, point.y, () => !stopped && CapturePopup.ForegroundGame() == game
                 && OverlayHost.Verified && Center(game, out var current) && point.x == current.x && point.y == current.y);
@@ -59,17 +61,17 @@ internal static unsafe class CaptureSelfTest
 
     private static bool Center(IntPtr game, out Native.POINT point)
     {
-        point = default;
-        if (!Native.GetClientRect(game, out var rect) || rect.right < Size || rect.bottom < Size) return false;
-        point.x = (rect.right - Size) / 2;
-        point.y = (rect.bottom - Size) / 2;
-        return Native.ClientToScreen(game, ref point);
+        var area = DesktopDisplay.Client(game);
+        point = new Native.POINT { x = area.X + (area.Width - Size) / 2, y = area.Y + (area.Height - Size) / 2 };
+        return area.Width >= Size && area.Height >= Size;
     }
 
     internal static Report ProbeAt(int x, int y, Func<bool> stable)
     {
         try
         {
+            using var dpi = PerMonitorDpiScope.Enter();
+            if (!dpi.Active) return Unavailable("capture.test.window");
             if (!stable()) return Unavailable("capture.test.foreground");
             // Das öffentliche Muster am selben Ort bestätigt, dass der Capture-Pfad den richtigen Ausschnitt liest.
             using var reference = new CapturePopup(false);

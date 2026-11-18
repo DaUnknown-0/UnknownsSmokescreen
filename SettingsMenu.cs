@@ -37,13 +37,14 @@ internal static class SettingsMenu
     private static ConfigEntry<KeyCode> listening;
     private static int consumedFrame = -1;
     private static string hover;
-    private enum Page { General, Privacy, Capture, Viewers }
+    private enum Page { General, Privacy, Capture, Viewers, Hud }
     private static Page page;
     internal static bool PatchedAtStartup = true;
 
     // In diesem Frame hat das Menue eine Taste verbraucht (Belegung oder Umschalten).
     internal static bool KeyConsumed => consumedFrame == Time.frameCount;
     internal static bool IsOpen => Alive(popup) && popup.activeSelf;
+    internal static bool TakesHotkeys => listening != null || KeyConsumed || ChatOpen();
     private static bool Alive(Object o) => RenderState.Alive(o);
 
     private static readonly Color On = new(0.18f, 0.72f, 0.24f), OnHover = new(0.12f, 0.5f, 0.16f);
@@ -66,6 +67,12 @@ internal static class SettingsMenu
                 consumedFrame = Time.frameCount;
                 if (IsOpen) Close(); else Open();
                 return;
+            }
+            if (Input.GetKeyDown(SmokescreenPlugin.ProfileHotkey.Value)
+                && !ChatOpen() && (OverlayHost.GameForeground || CapturePopup.ForegroundGame() != IntPtr.Zero))
+            {
+                consumedFrame = Time.frameCount;
+                Profiles.Cycle();
             }
             if (IsOpen) Refresh();
         }
@@ -172,13 +179,18 @@ internal static class SettingsMenu
         hint.rectTransform.sizeDelta = new Vector2(5.2f, 0.6f);
         hint.enableWordWrapping = true;
 
-        Page other = page == Page.General ? Page.Privacy : Page.General;
-        Button("Page", 0, -1.9f, 1.45f, () => T(other == Page.Privacy ? "menu.privacy" : "menu.general"),
-            () => Neutral, "menu.page.hint", () => ShowPage(other));
-        if (page != Page.Capture)
-            Button("CapturePage", -1.55f, -1.9f, 1.45f, () => T("menu.capture"), () => Neutral, "menu.page.hint", () => ShowPage(Page.Capture));
-        if (page != Page.Viewers)
-            Button("ViewersPage", 1.55f, -1.9f, 1.45f, () => T("menu.viewers"), () => Neutral, "menu.page.hint", () => ShowPage(Page.Viewers));
+        string[] pages = { "menu.general", "menu.privacy", "menu.capture", "menu.viewers", "menu.hud" };
+        string[] names = { "Page", "PrivacyPage", "CapturePage", "ViewersPage", "HudPage" };
+        int tab = 0;
+        for (int i = 0; i < pages.Length; i++)
+        {
+            var destination = (Page)i;
+            if (destination == page) continue;
+            string label = pages[i];
+            string name = destination == Page.Privacy && page == Page.General ? "Page" : names[i];
+            Button(name, -1.77f + 1.18f * tab++, -1.9f, 1.14f, () => T(label),
+                () => Neutral, "menu.page.hint", () => ShowPage(destination));
+        }
         if (page == Page.Privacy)
         {
             Choice(-1.17f, 1.25f, "vision", SmokescreenPlugin.CrewVision);
@@ -192,6 +204,7 @@ internal static class SettingsMenu
         }
         else if (page == Page.Capture) BuildCapture();
         else if (page == Page.Viewers) BuildViewers();
+        else if (page == Page.Hud) BuildHud();
         else
         {
         float[] row = { 1.25f, 0.62f, -0.01f, -0.64f, -1.27f };
@@ -234,10 +247,10 @@ internal static class SettingsMenu
         CaptureVerdict(0, "DXGI", r => r.Dxgi);
         CaptureVerdict(1.55f, "WGC", r => r.Wgc);
         Button("UnlockFeed", -1.17f, -0.01f, 2.2f, () => T(SmokescreenPlugin.FeedEnabled ? "menu.feed.lock" : "menu.feed.unlock"),
-            () => SmokescreenPlugin.FeedEnabled ? Warn : SmokescreenPlugin.RecordingFeed.Value ? Neutral : Off,
+            () => SmokescreenPlugin.FeedEnabled ? Warn : SmokescreenPlugin.FeedAllowed ? Neutral : Off,
             "menu.capture.unlock", () =>
             {
-                if (SmokescreenPlugin.RecordingFeed.Value)
+                if (SmokescreenPlugin.FeedAllowed)
                     SmokescreenPlugin.SetFeedUnlocked(!SmokescreenPlugin.FeedUnlocked);
             });
         Toggle(1.17f, -0.01f, () => T("menu.capture.replay.label"), SmokescreenPlugin.DelayedReplay, "menu.capture.replay", () =>
@@ -254,6 +267,26 @@ internal static class SettingsMenu
             {
                 if (OverlayHost.ProtectionFailed && SmokescreenPlugin.PrivateOverlay.Value) OverlayChanged();
             });
+    }
+
+    private static void BuildHud()
+    {
+        Button("Profile", -1.17f, 1.25f, 2.2f, () => T("menu.profile." + Profiles.Current),
+            () => Neutral, "menu.profile.hint", Profiles.Cycle);
+        KeyButton(1.17f, 1.25f, "menu.key.profile", SmokescreenPlugin.ProfileHotkey);
+        Choice(-1.17f, 0.62f, "hold", SmokescreenPlugin.HoldHud);
+        Toggle(1.17f, 0.62f, () => T("menu.adaptive"), SmokescreenPlugin.AdaptiveHudRate, "menu.adaptive.hint");
+        Button("BudgetMinus", -2.0f, -0.01f, 0.55f, () => "-", () => Neutral, "menu.budget.hint",
+            () => Step(SmokescreenPlugin.HudBudget, -1, 5, 50));
+        Button("Budget", -1.17f, -0.01f, 1.05f,
+            () => Texts.F("menu.budget.value", SmokescreenPlugin.HudBudget.Value / 10, SmokescreenPlugin.HudBudget.Value % 10),
+            () => Neutral, "menu.budget.hint", null);
+        Button("BudgetPlus", -0.34f, -0.01f, 0.55f, () => "+", () => Neutral, "menu.budget.hint",
+            () => Step(SmokescreenPlugin.HudBudget, 1, 5, 50));
+        Button("HudRate", 1.17f, -0.01f, 2.2f, () => Texts.F("menu.rate.effective", OverlayContent.EffectiveHudRate),
+            () => Neutral, "menu.rate.effective.hint", null);
+        Button("ProfileDetails", 0, -0.64f, 4.4f, () => T("menu.profile.detail." + Profiles.Current),
+            () => Neutral, "menu.profile.hint", null);
     }
 
     private static void CaptureVerdict(float x, string name, Func<CaptureSelfTest.Report, CaptureSelfTest.Verdict> get)

@@ -29,7 +29,7 @@ internal static class RoundOutputs
 
     internal static void Tick(bool started)
     {
-        ViewerServer.Configure(SettingsMenu.PatchedAtStartup && SmokescreenPlugin.ViewerPage.Value ? SmokescreenPlugin.ViewerPort.Value : 0);
+        ViewerServer.Configure(SettingsMenu.PatchedAtStartup && SmokescreenPlugin.ViewerPageEnabled ? SmokescreenPlugin.ViewerPort.Value : 0);
         if (roundOpen && !started && !ending) Abort();
     }
 
@@ -50,7 +50,7 @@ internal static class RoundOutputs
         ending = roundOpen = false;
         DelayedRecording.Finish();
         OverlayContent.ReleaseReplay();
-        if (!SmokescreenPlugin.ViewerPage.Value) return;
+        if (!SmokescreenPlugin.ViewerPageEnabled) return;
         try
         {
             var assembly = typeof(TheOtherRoles.RoleInfo).Assembly;

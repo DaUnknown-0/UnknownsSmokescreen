@@ -57,10 +57,13 @@ internal static class OverlayContent
     private static Texture2D atlasCpu, fullCpu, probeCpu;
     private static bool releaseAfterFrame;
     private static int width, height;
-    private static float next, metricsAt;
+    private static float next, nextFeed, metricsAt;
     private static int frames, islandFrames;
     private static double renderMs;
-    private static bool visible = true;
+    private static readonly HudVisibility visibility = new();
+    private static bool wasVisible;
+    private static readonly HudRate rate = new();
+    private static int geometryVersion, visualRevision;
     private static bool diagnostic;
     private static bool diagnosticInitialized, diagnosticConfig;
     private static float diagnosticEnd;
@@ -69,78 +72,120 @@ internal static class OverlayContent
     private static readonly AnchorPositions positions = new();
     internal static long PublishedFrames;
     internal static double LastFrameMilliseconds;
-    internal static void Reset() { next = 0; }
+    internal static int EffectiveHudRate { get; private set; } = 15;
+    internal static void Reset() { next = nextFeed = 0; }
+
+    internal static void CancelHold()
+    {
+        visibility.CancelHold();
+        if (SmokescreenPlugin.HoldHud.Value) OverlayHost.HidePrivate();
+    }
 
     internal static void Tick(bool active)
     {
         if (shutdown) return;
         BorderlessMode.Tick(Shield.Wanted && SmokescreenPlugin.PrivateOverlay.Value);
-        if (!SettingsMenu.KeyConsumed && Input.GetKeyDown(SmokescreenPlugin.OverlayHotkey.Value) && OverlayHost.GameForeground)
-            visible = !visible;
+        var key = SmokescreenPlugin.OverlayHotkey.Value;
+        bool holdMode = SmokescreenPlugin.HoldHud.Value;
+        bool down = Input.GetKeyDown(key);
+        bool pressed = holdMode && Input.GetKey(key);
+        bool acceptsKey = (down || pressed) && OverlayHost.GameForeground && !SettingsMenu.TakesHotkeys;
+        bool visible = visibility.Update(holdMode, active, acceptsKey, down, pressed);
         // Das letzte private Bild erst nach dem ersten unmaskierten Bildschirm freigeben.
         releaseAfterFrame = !active;
         if (!active) return;
         InitializeDiagnostics();
+        if (visible && !wasVisible)
+        {
+            OverlayHost.Discard();
+            next = 0;
+        }
+        wasVisible = visible;
         OverlayHost.SetVisible(visible, true);
+        int currentGeometry = OverlayHost.GeometryVersion;
+        if (geometryVersion != currentGeometry)
+        {
+            geometryVersion = currentGeometry;
+            PrivateSet.Reset();
+            next = 0;
+        }
         IntroPrivacy.Prepare(Mask.Intro);
         TeamColors.Refresh();
         DiscoverCameras();
         try { VisionMask.Prepare(); }
         catch (Exception) { VisionMask.Ready = false; }
-        if (SmokescreenPlugin.DelayedReplay.Value && RenderState.Alive(mainCamera) && DelayedRecording.TryBeginSample())
+        if (SmokescreenPlugin.ReplayEnabled && RenderState.Alive(mainCamera) && DelayedRecording.TryBeginSample())
             CaptureDelayed();
         var minigame = ActiveMinigame;
-        if (minigame != minigameAtCapture) next = 0;
-        bool wantPrivate = OverlayHost.PrivateWanted, wantFeed = OverlayHost.FeedWanted;
-        if ((!wantPrivate && !wantFeed) || Time.realtimeSinceStartup < next) return;
+        float now = Time.realtimeSinceStartup;
+        int fps = SmokescreenPlugin.OverlayFps.Value;
+        EffectiveHudRate = rate.Update(now, Time.unscaledDeltaTime, fps,
+            SmokescreenPlugin.AdaptiveHudRate.Value ? SmokescreenPlugin.HudBudget.Value : 0);
+        int w = Screen.width, h = Screen.height;
+        bool resized = width != w || height != h;
+        bool minigameChanged = minigame != minigameAtCapture;
+        bool wantPrivate = OverlayHost.PrivateWanted && (now >= next || minigameChanged || resized);
+        bool wantFeed = OverlayHost.FeedWanted && (now >= nextFeed || resized);
+        if (diagnostic && now > diagnosticEnd)
+        {
+            diagnostic = false;
+            OverlayHost.DiagnosticCapture = false;
+            OverlayHost.EndDiagnostic();
+        }
+        if ((!wantPrivate && !wantFeed) || w < 1 || h < 1 || (long)w * h > 3840L * 2160) return;
         // Die Lage folgt ohnehin jedem Frame. Unveraenderter Inhalt wird nur alle 250 ms neu aufgenommen.
-        bool fullNow = RenderState.Alive(Mask.Intro) || RenderState.Alive(MeetingHud.Instance) || privateLayer < 0 || !RenderState.Alive(mainCamera);
-        bool islandsDue = !fullNow && wantPrivate && (minigame != minigameAtCapture
-            || Time.realtimeSinceStartup - lastIslandCapture >= 0.25f || PrivateSet.ContentChanged());
-        if (!fullNow && wantPrivate && !islandsDue) skippedCaptures++;
-        if (!fullNow && !wantFeed && !islandsDue) return;
-        next = Time.realtimeSinceStartup + 1f / SmokescreenPlugin.OverlayFps.Value;
-        var watch = Stopwatch.StartNew();
+        bool full = RenderState.Alive(Mask.Intro) || RenderState.Alive(MeetingHud.Instance) || privateLayer < 0 || !RenderState.Alive(mainCamera);
+        if (wantPrivate && !full && !minigameChanged && !resized && next != 0
+            && visualRevision == PrivateVisuals.Revision && now - lastIslandCapture < 0.25f && !PrivateSet.ContentChanged())
+        {
+            wantPrivate = false;
+            skippedCaptures++;
+        }
+        if (!wantPrivate && !wantFeed) return;
+        long begin = Stopwatch.GetTimestamp();
+        double feedMs = 0;
         try
         {
-            int w = Screen.width, h = Screen.height;
-            if (w < 1 || h < 1 || (long)w * h > 3840L * 2160) return;
             Ensure(w, h);
             Rendering = true;
-            // Intro und Meeting verdecken die Welt: dort bleibt das echte Vollbild deckend.
-            bool full = RenderState.Alive(Mask.Intro) || RenderState.Alive(MeetingHud.Instance) || privateLayer < 0 || !RenderState.Alive(mainCamera);
             if (wantFeed)
             {
+                nextFeed = now + 1f / fps;
+                long feedStart = Stopwatch.GetTimestamp();
                 RenderFull(stage[0]);
                 OverlayHost.PublishFeed(ReadFull(w, h), w, h);
+                feedMs = ElapsedMs(feedStart);
             }
-            if (full && wantPrivate)
+            if (wantPrivate)
             {
-                if (wantFeed && !VisionMask.Different) PublishFull(fullCpu.GetWritableImageData(0), w, h);
+                next = now + 1f / EffectiveHudRate;
+                visualRevision = PrivateVisuals.Revision;
+                if (!full) CaptureIslands(w, h);
+                else if (wantFeed && !VisionMask.Different) PublishFull(fullCpu.GetWritableImageData(0), w, h);
                 else
                 {
                     RenderPrivateFull(0);
                     PublishFull(ReadFull(w, h), w, h);
                 }
+                minigameAtCapture = minigame;
+                rate.Sample(ElapsedMs(begin) - feedMs);
             }
-            if (!full && islandsDue) CaptureIslands(w, h);
-            minigameAtCapture = minigame;
             if (diagnostic && PublishedFrames % 90 == 0) RequestProbe("hud");
             PublishedFrames++;
         }
         catch (Exception e) { Failed(e); }
         finally { Rendering = false; }
-        watch.Stop();
-        LastFrameMilliseconds = watch.Elapsed.TotalMilliseconds;
+        LastFrameMilliseconds = ElapsedMs(begin);
         renderMs += LastFrameMilliseconds; frames++;
         if (Time.realtimeSinceStartup > metricsAt)
         {
             using var process = Process.GetCurrentProcess();
-            SmokescreenPlugin.Logger.LogInfo($"HUD: {width}x{height}, Bilder={PublishedFrames}, Render/Kopie={renderMs / Math.Max(1, frames):F2} ms, Inselbilder={islandFrames}, uebersprungen={skippedCaptures}, Packen={(blitUnavailable ? "ReadPixels je Gruppe" : "GPU-Atlas")}, je Inselbild Menge={setMs / Math.Max(1, islandFrames):F2} Renders={renderPassMs / Math.Max(1, islandFrames):F2} Readback={readMs / Math.Max(1, islandFrames):F2} ({readPixels / 1000 / Math.Max(1, islandFrames)} kpx, Gruppen={PrivateSet.GroupCount}) Kopie={copyMs / Math.Max(1, islandFrames):F2} ms, Inseln={PrivateSet.Count}, Elemente={PrivateSet.LastItems}, Atlas={PrivateSet.AtlasWidth}x{PrivateSet.AtlasHeight}, Layer={privateLayer}, Prozess={process.PrivateMemorySize64 / 1048576} MiB, Masken={CameraMaskScope.Applications}, Restore={CameraMaskScope.Restores}, ApplyGesamt={CameraMaskScope.ApplyMilliseconds:F2} ms");
+            SmokescreenPlugin.Logger.LogInfo($"HUD: {width}x{height}, Bilder={PublishedFrames}, Render/Kopie={renderMs / Math.Max(1, frames):F2} ms, Inselbilder={islandFrames}, uebersprungen={skippedCaptures}, Packen={(blitUnavailable ? "ReadPixels je Gruppe" : "GPU-Atlas")}, je Inselbild Menge={setMs / Math.Max(1, islandFrames):F2} Renders={renderPassMs / Math.Max(1, islandFrames):F2} Readback={readMs / Math.Max(1, islandFrames):F2} ({readPixels / 1000 / Math.Max(1, islandFrames)} kpx, Gruppen={PrivateSet.GroupCount}) Kopie={copyMs / Math.Max(1, islandFrames):F2} ms, Inseln={PrivateSet.Count}, Elemente={PrivateSet.LastItems}, Atlas={PrivateSet.AtlasWidth}x{PrivateSet.AtlasHeight}, Layer={privateLayer}, Prozess={process.PrivateMemorySize64 / 1048576} MiB, Masken={CameraMaskScope.Applications}, Restore={CameraMaskScope.Restores}, ApplyGesamt={CameraMaskScope.ApplyMilliseconds:F2} ms, HUD-Ziel={EffectiveHudRate} fps");
             renderMs = 0; frames = 0; islandFrames = 0; skippedCaptures = 0; setMs = renderPassMs = readMs = copyMs = 0; readPixels = 0; metricsAt = Time.realtimeSinceStartup + 15;
         }
-        if (diagnostic && Time.realtimeSinceStartup > diagnosticEnd) { diagnostic = false; OverlayHost.EndDiagnostic(); }
     }
+
+    private static double ElapsedMs(long since) => (Stopwatch.GetTimestamp() - since) * (1000.0 / Stopwatch.Frequency);
 
     // Echt ueber Schwarz/Weiss, maskiert ueber Schwarz/Weiss. Nur private Renderer, HUD und Abdunkelung.
     private static void CaptureIslands(int w, int h)
@@ -151,7 +196,7 @@ internal static class OverlayContent
         long t1 = Stopwatch.GetTimestamp();
         setMs += (t1 - t0) * 1000.0 / Stopwatch.Frequency;
         int count = PrivateSet.Count;
-        if (count == 0) { OverlayHost.PublishEmpty(w, h); return; }
+        if (count == 0) { OverlayHost.PublishEmpty(w, h, geometryVersion); return; }
         int captureWidth = PrivateSet.AtlasWidth, captureHeight = PrivateSet.AtlasHeight;
         EnsureAtlas(captureWidth, captureHeight);
         bool gpu = PrepareBlit();
@@ -184,7 +229,7 @@ internal static class OverlayContent
         long copyStart = Stopwatch.GetTimestamp();
         var data = atlasCpu.GetWritableImageData(0);
         if (data == IntPtr.Zero) throw new InvalidOperationException("Atlaspuffer fehlt");
-        var set = OverlayHost.BeginCapture(w, h, captureWidth, captureHeight);
+        var set = OverlayHost.BeginCapture(w, h, captureWidth, captureHeight, geometryVersion);
         if (set == null) return;
         int rowBytes = captureWidth * 4, sourceStride = atlasCpu.width * 4;
         for (int y = 0; y < captureHeight; y++)
@@ -215,7 +260,7 @@ internal static class OverlayContent
 
     private static void PublishFull(IntPtr pixels, int w, int h)
     {
-        var set = OverlayHost.BeginCapture(w, h, w, h);
+        var set = OverlayHost.BeginCapture(w, h, w, h, geometryVersion);
         if (set == null) return;
         System.Runtime.InteropServices.Marshal.Copy(pixels, set.Atlas, 0, w * h * 4);
         set.Stride = w * 4;
@@ -235,10 +280,11 @@ internal static class OverlayContent
             PrivateSet.Track(positions, Screen.height, Time.realtimeSinceStartup);
             positions.Ortho = RenderState.Alive(mainCamera) ? mainCamera.orthographicSize : 0;
             positions.Frame = Time.frameCount; positions.Probe = label; positions.Delay = SmokescreenPlugin.SyncFrames.Value;
-            OverlayHost.PublishPositions(positions);
+            OverlayHost.PublishPositions(positions, geometryVersion);
         }
         if (!releaseAfterFrame || Shield.Active || CameraMaskScope.LastMaskedFrame == Time.frameCount) return;
         releaseAfterFrame = false;
+        wasVisible = false;
         OverlayHost.SetVisible(false);
         OverlayHost.Discard();
         ReleaseImages();
@@ -743,6 +789,20 @@ internal static class OverlayContent
     }
 }
 
+internal sealed class HudVisibility
+{
+    private bool toggledVisible = true, held;
+
+    internal bool Update(bool holdMode, bool active, bool acceptsKey, bool down, bool pressed)
+    {
+        if (!holdMode && acceptsKey && down) toggledVisible = !toggledVisible;
+        held = holdMode && active && acceptsKey && pressed && (held || down);
+        return holdMode ? held : toggledVisible;
+    }
+
+    internal void CancelHold() => held = false;
+}
+
 internal static class BorderlessMode
 {
     private static bool changed;
@@ -751,7 +811,8 @@ internal static class BorderlessMode
     private static float synchronizeAt;
     internal static void Tick(bool wanted)
     {
-        if (wanted && !changed)
+        if (wanted && Screen.fullScreenMode == FullScreenMode.ExclusiveFullScreen
+            && Time.realtimeSinceStartup >= synchronizeAt)
         {
             mode = Screen.fullScreenMode; width = Screen.width; height = Screen.height;
             changed = true;
@@ -762,18 +823,6 @@ internal static class BorderlessMode
         else if (!wanted && changed)
         {
             changed = false; Screen.SetResolution(width,height,mode);
-        }
-        else if (wanted && changed && Screen.fullScreenMode == FullScreenMode.FullScreenWindow
-            && Time.realtimeSinceStartup >= synchronizeAt)
-        {
-            synchronizeAt = Time.realtimeSinceStartup + 0.5f;
-            var hwnd = OverlayHost.GameWindow;
-            if (hwnd == IntPtr.Zero || Native.IsIconic(hwnd) || !Native.GetClientRect(hwnd, out var client)) return;
-            int w = client.right - client.left, h = client.bottom - client.top;
-            // Nach exklusivem Vollbild kann Unity zunächst die alte Renderauflösung
-            // behalten. Der tatsächliche randlose Client ist für die Pixeldeckung maßgeblich.
-            if (w > 0 && h > 0 && (Screen.width != w || Screen.height != h))
-                Screen.SetResolution(w, h, FullScreenMode.FullScreenWindow);
         }
     }
 }

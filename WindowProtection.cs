@@ -10,7 +10,7 @@ internal static class WindowProtection
     internal enum Problem
     {
         None, Wine, VersionQuery, OldWindows, DwmQuery, NoComposition, WindowClass,
-        CreateWindow, SetAffinity, ReadAffinity, WrongAffinity, LostRead, LostAffinity, Thread
+        CreateWindow, SetAffinity, ReadAffinity, WrongAffinity, LostRead, LostAffinity, Thread, DpiContext
     }
 
     internal readonly record struct SystemInfo(int VersionStatus, int Major, int Build, int DwmStatus,

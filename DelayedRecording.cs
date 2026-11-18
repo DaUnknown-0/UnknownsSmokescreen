@@ -79,7 +79,7 @@ internal static class DelayedRecording
 
     internal static void Export()
     {
-        if (!CanExport || !SmokescreenPlugin.DelayedReplay.Value) return;
+        if (!CanExport || !SmokescreenPlugin.ReplayEnabled) return;
         var frames = finished;
         string root = Path.Combine(BepInEx.Paths.BepInExRootPath, "SmokescreenReplays");
         status = "capture.replay.saving";

@@ -99,12 +99,13 @@ internal static class CaptureWatch
         bool attempted = false;
         try
         {
+            using var dpi = PerMonitorDpiScope.Enter();
+            if (!dpi.Active) return;
             while (!stopped && warning is string message)
             {
                 var game = CapturePopup.ForegroundGame();
-                var origin = new Native.POINT();
-                if (game == IntPtr.Zero || !Native.GetClientRect(game, out var rect) || rect.right < 280
-                    || !Native.ClientToScreen(game, ref origin) || CaptureSelfTest.Running)
+                var area = DesktopDisplay.Client(game);
+                if (area.Width < 280 || CaptureSelfTest.Running)
                 {
                     popup?.Hide();
                     previous = null;
@@ -112,8 +113,8 @@ internal static class CaptureWatch
                 else
                 {
                     if (!attempted) { attempted = true; popup = new CapturePopup(true); }
-                    int width = Math.Min(rect.right - 24, 520);
-                    int x = origin.x + (rect.right - width) / 2, y = origin.y + 18;
+                    int width = Math.Min(area.Width - 24, 520);
+                    int x = area.X + (area.Width - width) / 2, y = area.Y + 18;
                     if (!popup.Verified) { popup.Hide(); previous = null; }
                     else if (message != previous || x != lastX || y != lastY)
                     {

@@ -13,7 +13,7 @@ internal static class ViewerExplanation
 
     internal static void Tick(bool active)
     {
-        if (!active || !SmokescreenPlugin.ViewerNotice.Value || OverlayContent.ActiveMinigame != System.IntPtr.Zero
+        if (!active || !Profiles.AllowsViewerOutputs || !SmokescreenPlugin.ViewerNotice.Value || OverlayContent.ActiveMinigame != System.IntPtr.Zero
             || SettingsMenu.IsOpen)
         {
             if (RenderState.Alive(text) && text.gameObject.activeSelf) text.gameObject.SetActive(false);

@@ -12,7 +12,7 @@ Die privaten Originale bleiben erhalten. Das Overlay enthält nur die Elemente, 
 
 Echt und maskiert werden diese Elemente je einmal über Schwarz und über Weiß gerendert, zusammen mit dem normalen HUD und der Abdunkelung des Spiels. Daraus ergibt sich pro Pixel genau die Schicht, die über dem live sichtbaren Spielbild das echte Bild ergibt. Nur wo das öffentliche Element nicht überdeckbar ist (zum Beispiel weiße Buchstaben unter einem roten Namen oder "Crewmate" unter einer längeren echten Rolle), liegt eine schmale schwarze Platte hinter dem echten Element; sie wirkt wie eine kräftigere Textkontur. Jede Insel gehört zu einem Anker: der HUD ist bildschirmfest, Namen, Info-Zeilen und Umrisse folgen ihrem Spieler, Weltobjekte ihrer Wurzel. Die Inhalte werden mit der eingestellten Rate aufgenommen, ihre Lage folgt jedem Spielframe. Intro und Meeting werden vollflächig gedeckt. Es werden keine Knöpfe nachgezeichnet und keine separaten Textkästen verwendet.
 
-Klickflächen und Fähigkeitshotkeys bleiben unverändert. **F8** blendet das private HUD aus oder wieder ein. Die öffentliche Maske und der ausdrücklich aktivierte RecordingFeed laufen weiter. Ausgeschaltete oder durch Verkleidung geänderte Namensschilder werden respektiert. Öffentliche Namen bleiben unabhängig von der eigenen Rolle weiß und ohne Teamzeichen. Das private Bild übernimmt die native Sichtbarkeit, Teamfarben und bekannten Beziehungen aus TOR und geladenen Erweiterungen. Vorhandene UC-Namensadapter werden per Reflection eingebunden.
+Klickflächen und Fähigkeitshotkeys bleiben unverändert. **F8** blendet das private HUD aus oder wieder ein. Unter **HUD** lässt sich auf **Halten** umstellen. Dann erscheint das private HUD bei gedrückter Taste und verschwindet beim Loslassen, Fokusverlust oder Öffnen des Chats. Nach Fokuswechsel oder Tastenbelegung zählt ein neuer Tastendruck. Die öffentliche Maske und der ausdrücklich freigegebene RecordingFeed laufen weiter. Ausgeschaltete oder durch Verkleidung geänderte Namensschilder werden respektiert. Öffentliche Namen bleiben unabhängig von der eigenen Rolle weiß und ohne Teamzeichen. Das private Bild übernimmt die native Sichtbarkeit, Teamfarben und bekannten Beziehungen aus TOR und geladenen Erweiterungen. Vorhandene UC-Namensadapter werden per Reflection eingebunden.
 
 Im öffentlichen Intro erscheinen Crewmate, die Crew-Farbe und Crew-Beschreibung, der Crew-Sound und eine neutrale Crew-Aufstellung. Das private Bild behält die echte Aufstellung und die echte Rolle. Der Endscreen zeigt den echten Siegertext, die echten Farben und die unveränderte TOR-Rollenübersicht auch der Kamera. Der zusätzliche Smokescreen-Rückblick entfällt.
 
@@ -22,7 +22,9 @@ Der Chat mit Knopf, Benachrichtigung, Eingabe und Verlauf ist standardmäßig pr
 
 ## Fenster und Aufnahmeschutz
 
-Das private Fenster ist klickdurchlässig und liegt exakt über dem Client-Bereich des eigenen Unity-Spielfensters. Es erscheint nur, wenn dieses im Vordergrund und nicht minimiert ist. Bei aktivem Schutz wechselt das Spiel in ein randloses Fenster in Desktopgröße. Beim Abschalten werden der vorherige Modus und die vorherige Spielauflösung wiederhergestellt, einschließlich eines zuvor exklusiven Vollbildmodus.
+Das private Fenster ist klickdurchlässig und folgt dem Client-Bereich des eigenen Unity-Spielfensters in physischen Pixeln. Es erscheint im Vordergrund und bei sichtbarem, nicht minimiertem Spiel. Fenstermodus und randloses Vollbild lassen sich weiter verwenden. Exklusives Vollbild wechselt bei aktivem Schutz mit privatem HUD zu randlosem Vollbild. Beim Abschalten wird der gespeicherte exklusive Modus mit seiner Spielauflösung wiederhergestellt.
+
+Der Overlay-Thread verwendet Per-Monitor DPI Awareness V2. Ein Verschieben auf demselben Monitor versetzt die Anzeige. Beim Wechsel von Monitor, Fenster-DPI oder Client-Größe wartet sie auf eine zur neuen Geometrie passende Aufnahme. Liegt die Unity-Auflösung unter der physischen Client-Größe, wird das zusammengesetzte HUD passend skaliert. Die öffentliche Maske bleibt währenddessen aktiv. [Microsofts Dokumentation zur DPI-Skalierung](https://learn.microsoft.com/en-us/windows/win32/hidpi/high-dpi-desktop-application-development-on-windows).
 
 Das private Fenster wird erst angezeigt, wenn Windows `WDA_EXCLUDEFROMCAPTURE` gesetzt hat und `GetWindowDisplayAffinity` den Wert bestätigt. Erforderlich sind natives Windows 10 ab Version 2004 und aktive Desktop-Komposition. Bei Ablehnung oder späterem Verlust des Schutzes bleibt das Fenster aus. Der Menüstatus nennt die Ursache und einen passenden nächsten Schritt. **Aufnahme → Erneut versuchen** legt das private Fenster ohne Spielneustart neu an. Das BepInEx-Log enthält API-Fehlercodes, Windows-Build, DWM-Zustand und Hinweise auf Wine/Proton, Remote Desktop oder eine virtuelle Maschine. Beim Verlust im laufenden Spiel kommen Zeitpunkt und der zuletzt gelesene Affinity-Wert hinzu.
 
@@ -50,6 +52,17 @@ Der **Zuschauerhinweis** erklärt die feste Crewmate-Anzeige und die gegebenenfa
 
 Alle Einstellungen lassen sich im Spiel ändern: Knopf **Smokescreen...** im Optionsmenü von Among Us (Hauptmenü, Lobby und Esc-Menü im Spiel) oder Taste **F3** (`General / MenuKey`). Das Menü übernimmt Optik und Schrift der Vanilla-Optionen, wird mit der Maus bedient und mit Esc oder dem Schließen-Knopf beendet. Änderungen wirken sofort und werden in die Config geschrieben; die Bildrate bleibt zwischen 5 und 30. Tasten werden belegt, indem man auf den Tastenknopf klickt und dann die gewünschte Taste drückt (Esc bricht ab). Beim Überfahren erklärt die Fußzeile jeden Eintrag; ist der RecordingFeed an, steht dort dauerhaft eine Warnung.
 
+Die Seite **HUD** enthält das Ausgabeprofil und die Profiltaste, den Haltemodus und die adaptive HUD-Rate. Der Profilknopf und standardmäßig **F5** wechseln in derselben Reihenfolge zwischen den Profilen. Rolle, öffentliche Maske, Streamer-Modus-Bindung und manuelle Maskenschalter gelten in jedem Profil. Jeder Profilwechsel sperrt einen zuvor freigegebenen Feed. Für eine neue Freigabe braucht es weiterhin **Feed erlauben** und den Klick auf **Feed freigeben**.
+
+| Profil | Erlaubte optionale Ausgaben |
+|---|---|
+| Eigene Einstellungen (`Custom`) | Feed, Rückblick und Zuschauerausgaben nach den bestehenden Einstellungen. Standard für bestehende Configs. |
+| Live (`Live`) | Rückblick und konfigurierte Zuschauerausgaben. |
+| Nur Aufnahme (`Recording`) | Manuell freigegebener Feed und konfigurierter Rückblick. |
+| Privat spielen (`Private`) | Privates, aufnahmegeschütztes HUD nach der HUD-Einstellung. Beim Wechsel wird der aktuelle Rückblickpuffer verworfen. |
+
+Die adaptive HUD-Rate ist standardmäßig aus. Sie misst die Dauer der privaten Aufnahme einschließlich Rendern und Readback und schätzt diese Last pro Spielframe. Der Zielwert von 0,5 bis 5,0 ms steuert die Rate zwischen 5 fps und der eingestellten Obergrenze. Bei hoher Last kann schon die Mindestrate das Budget überschreiten. Das Menü zeigt das aktuelle Aufnahmeziel. Anker folgen weiterhin jedem Spielframe. Feed und Rückblick haben ihre eigene Taktung.
+
 Das Menü ist normales Spiel-UI und damit auch im Stream sichtbar. Es zeigt nur Einstellungen und neutrale Zustände („Schutz aktiv“, „Privates HUD aufnahmegeschützt“), nie Rolle oder Team. Wer auch die Einstellungen nicht zeigen will, öffnet es außerhalb einer Runde. Ist der Schutz beim Start per Config aus, lädt die Mod nur das Menü; nach dem Wiedereinschalten ist ein Neustart nötig.
 
 Datei: `BepInEx/config/com.daunknown.smokescreen.cfg`.
@@ -59,11 +72,16 @@ Datei: `BepInEx/config/com.daunknown.smokescreen.cfg`.
 | `General / Enabled` | `true` | Schutz aktivieren. |
 | `General / OnlyInStreamerMode` | `true` | Nur bei aktiviertem Streamer-Modus schützen. |
 | `General / MenuKey` | `F3` | Einstellungsmenü öffnen und schließen. |
+| `Profiles / Active` | `Custom` | Aktives Ausgabeprofil. |
+| `Profiles / SwitchKey` | `F5` | Zum nächsten Ausgabeprofil wechseln. |
 | `Mask / HideRoleButtons` | `true` | Rollenknöpfe öffentlich ausblenden. |
 | `Mask / HideRoleFlashes` | `true` | Rollenhinweise nur privat darstellen. |
 | `Overlay / PrivateOverlay` | `true` | Privates echtes HUD anzeigen. |
 | `Overlay / ToggleKey` | `F8` | Privates Overlay einblenden und ausblenden. |
-| `Overlay / FramesPerSecond` | `15` | Zielbildrate von 5 bis 30. Die tatsächliche Rate hängt von GPU, Auflösung und Szene ab. |
+| `Overlay / HoldKey` | `false` | HUD nur beim Halten der HUD-Taste anzeigen. |
+| `Overlay / FramesPerSecond` | `15` | Feste Zielrate oder Obergrenze für das adaptive HUD. Zielrate des RecordingFeeds bei Freigabe. |
+| `Overlay / AdaptiveRate` | `false` | Private HUD-Rate an die gemessene Last anpassen. |
+| `Overlay / BudgetTenthsMs` | `15` | Adaptives Zeitbudget pro Spielframe in Zehntelmillisekunden. |
 | `Overlay / SyncFrames` | `1` | Verankerte private Namen und Beschriftungen nutzen die Spielerlage von so vielen Frames zuvor (0 bis 4), weil das Spielbild später auf dem Monitor erscheint als das Overlay. Laufen private Namen beim Gehen voraus, erhöhen; hängen sie hinterher, verringern. Im Menü als "HUD sync". |
 | `Overlay / RecordingFeed` | `false` | Erlaubnis zur manuellen Sitzungsfreigabe des aufnehmbaren Originalfensters. |
 | `Capture / ObsWatch` | `true` | Privater Hinweis bei erkannten Aufnahmeprogrammen und Schutzproblemen. |
@@ -91,6 +109,34 @@ Beim Ende der Maskierung bleibt das private Bild bis nach dem ersten unmaskierte
 Eigene Kamera-Nachbearbeitung, komplexe abhängige Texturkameras und UI mit `ScreenSpaceOverlay` können zusätzliche Integration benötigen. Neue Rollenobjekte anderer Modversionen sind nicht automatisch vollständig abgedeckt. Sichtbare Handlungen wie Töten, Verwandeln, Bewegung und öffentlich sichtbare Effekte bleiben mögliche Informationsquellen. Die öffentlich feste Rolle ändert die tatsächliche Spielrolle nicht.
 
 Solange ein Vanilla-Minigame offen ist, blendet das private HUD weltverankerte Inseln und die private Statuszeile aus. Unterstützte zusätzliche UI-Kameras mit getrennten Layern verdecken private Inseln entsprechend der Renderreihenfolge. Inhalte von abhängigen Texturkameras bleiben im privaten HUD in ihrer öffentlichen Fassung.
+
+## Schnittstelle für andere Mods
+
+Der öffentliche Typ `UnknownsSmokescreen.PrivateVisuals` im Assembly `UnknownsSmokescreen` bietet die lokale API-Version 1 (`public const int ApiVersion`). Unity-Objekte auf dem Hauptthread registrieren, bevor sie erstmals sichtbar werden. Ein optionaler BepInEx-Soft-Dependency-Eintrag mit der GUID `com.daunknown.smokescreen` kann die Ladereihenfolge festlegen. Für das Beispiel braucht die integrierende Mod nur Unity und Harmony.
+
+| Statische Methode | Öffentliche Darstellung in geschützten Classic- und Guesser-Runden |
+|---|---|
+| `long RegisterRenderer(UnityEngine.Renderer renderer)` | Blendet einen Renderer aus, zum Beispiel einen Fallenmarker. |
+| `long RegisterTree(UnityEngine.GameObject root)` | Blendet Renderer im Baum aus, etwa ein Panel mit SpriteRenderern und Mesh-Texten. Das schließt später hinzugefügte Kinder ein. |
+| `long RegisterText(TMPro.TextMeshPro text, string publicText)` | Ersetzt Welt- oder HUD-Meshtext durch einen fest vorgegebenen öffentlichen Text in Weiß. Bei `null` verschwindet der Text samt Unterrenderern, bei `""` wird er durch einen leeren Text ersetzt. |
+| `bool Unregister(long token)` | Entfernt die entsprechende Registrierung. Bei weiterhin sichtbaren Objekten gilt die Änderung ab dem nächsten Maskenrender. |
+
+```csharp
+// Auf dem Unity-Hauptthread, sobald der eigene Renderer angelegt ist.
+var api = HarmonyLib.AccessTools.TypeByName("UnknownsSmokescreen.PrivateVisuals");
+var register = api != null && api.GetField("ApiVersion")?.GetRawConstantValue() is int version && version == 1
+    ? api.GetMethod("RegisterRenderer", new[] { typeof(UnityEngine.Renderer) })
+    : null;
+long token = register?.Invoke(null, new object[] { ownTrapRenderer }) is long id ? id : 0;
+
+// Beim Entfernen des eigenen Renderers.
+if (token != 0)
+    api.GetMethod("Unregister", new[] { typeof(long) })?.Invoke(null, new object[] { token });
+```
+
+Eine gültige Registrierung liefert ein Token ungleich 0. Registrierungen bleiben bis zur Abmeldung oder Zerstörung des Objekts erhalten und gelten über Rundenwechsel hinweg. Pro Ziel eine Registrierung verwenden. Objekte bleiben in Spiel- und Rollenlogik unverändert. Im geschützten privaten HUD werden die Originale über die üblichen Kamera- und Inselpfade gezeigt. Der explizit freigegebene Originalfeed und der optionale Rückblick können die Originale enthalten. `IsMaskActive` meldet, ob der aktuelle Spielzustand in den Schutzbereich fällt und die Kernpatches geladen sind. Für Informationen, die auch ohne Smokescreen, in der Lobby oder außerhalb geschützter Runden privat bleiben müssen, muss der Integrator ihre Sichtbarkeit selbst steuern.
+
+Die API unterstützt Unity-Renderer auf den vorhandenen Haupt- und UI-Kamerapfaden. Camera-Canvas- und Screen-Space-Overlay-Elemente mit `CanvasRenderer`, `TextMeshProUGUI`, IMGUI, Audio und Ausgaben außerhalb des Spielfensters liegen außerhalb dieses Vertrags.
 
 ## Installation und Build
 
