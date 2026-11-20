@@ -29,6 +29,7 @@ internal static class RoundOutputs
 
     internal static void Tick(bool started)
     {
+        ViewerServer.German = Texts.IsGerman;
         ViewerServer.Configure(SettingsMenu.PatchedAtStartup && SmokescreenPlugin.ViewerPageEnabled ? SmokescreenPlugin.ViewerPort.Value : 0);
         if (roundOpen && !started && !ending) Abort();
     }
@@ -80,6 +81,8 @@ internal static class ViewerServer
     private static TcpListener listener;
     private static int requested;
     private static volatile bool running;
+    /// <summary>Spielsprache, vom Hauptthread gesetzt; der Server liest sie beim Ausliefern der Seite.</summary>
+    internal static volatile bool German;
     internal static bool Running => running;
     internal static bool Failed => requested != 0 && !running;
     internal static string Address => "http://127.0.0.1:" + SafePort(SmokescreenPlugin.ViewerPort.Value) + "/";
@@ -174,7 +177,9 @@ internal static class ViewerServer
         foreach (var line in lines)
         {
             if (!line.StartsWith("Host:", StringComparison.OrdinalIgnoreCase)) continue;
-            if (line[5..].Trim() != "127.0.0.1:" + port) return;
+            // Nur Loopback-Namen (Schutz gegen DNS-Rebinding); OBS-Nutzer tragen oft localhost ein.
+            string host = line[5..].Trim();
+            if (host != "127.0.0.1:" + port && !string.Equals(host, "localhost:" + port, StringComparison.OrdinalIgnoreCase)) return;
             hosts++;
         }
         if (hosts != 1) return;
@@ -182,7 +187,7 @@ internal static class ViewerServer
         if (request.Length != 3 || request[0] != "GET") return;
         var (status, type, body) = request[1] switch
         {
-            "/" => ("200 OK", "text/html; charset=utf-8", Page),
+            "/" => ("200 OK", "text/html; charset=utf-8", German ? PageDe : PageEn),
             "/roles" => ("200 OK", "application/json", Volatile.Read(ref result) ?? Empty),
             _ => ("404 Not Found", "text/plain", Array.Empty<byte>())
         };
@@ -194,16 +199,22 @@ internal static class ViewerServer
     }
 
     private static readonly byte[] Empty = Encoding.UTF8.GetBytes("[]");
-    private static readonly byte[] Page = Encoding.UTF8.GetBytes("""
+    private static readonly byte[] PageDe = MakePage("de", "Rollenübersicht", "Rollen am Rundenende");
+    private static readonly byte[] PageEn = MakePage("en", "Role overview", "Roles at round end");
+
+    private static byte[] MakePage(string lang, string title, string heading) => Encoding.UTF8.GetBytes(PageTemplate
+        .Replace("{lang}", lang).Replace("{title}", title).Replace("{heading}", heading));
+
+    private const string PageTemplate = """
         <!doctype html>
-        <html lang="de"><meta charset="utf-8"><title>Smokescreen | Rollenübersicht</title>
+        <html lang="{lang}"><meta charset="utf-8"><title>Smokescreen | {title}</title>
         <style>
         body { margin:0; color:#f2f4f8; font:22px system-ui,sans-serif }
         main { display:inline-block; background:#16202a; padding:24px 36px; border-radius:14px }
         h1 { font-size:28px; margin:0 0 12px } ul { margin:0; padding:0; list-style:none }
         li { padding:5px 0 } strong { color:#9ee7ce }
         </style>
-        <main hidden><h1>Rollen am Rundenende</h1><ul></ul></main>
+        <main hidden><h1>{heading}</h1><ul></ul></main>
         <script>
         const panel = document.querySelector('main'), list = document.querySelector('ul');
         async function update() {
@@ -224,5 +235,5 @@ internal static class ViewerServer
         }
         update();
         </script></html>
-        """);
+        """;
 }

@@ -33,7 +33,7 @@ internal sealed class CameraScreens
     private int cachedScene;
     private readonly List<Renderer> sceneConsumers = new();
     private readonly HashSet<IntPtr> cachedSources = new();
-    private IntPtr cachedGame;
+    private IntPtr cachedGame, cachedShip;
     private bool discovered;
 
     internal void Discover(RenderTexture[] originals)
@@ -44,7 +44,11 @@ internal sealed class CameraScreens
         int scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().handle;
         var game = Minigame.Instance;
         var gameId = RenderState.Alive(game) ? game.Pointer : IntPtr.Zero;
-        if (discovered && scene == cachedScene && gameId == cachedGame && cachedSources.SetEquals(sources)) return;
+        // Lobby und Runde teilen sich eine Szene; das Schiff kommt erst spaeter hinzu. Sein Wechsel loest
+        // daher ebenfalls einen neuen Szenen-Scan aus (einmal pro Runde).
+        var ship = ShipStatus.Instance;
+        var shipId = RenderState.Alive(ship) ? ship.Pointer : IntPtr.Zero;
+        if (discovered && scene == cachedScene && shipId == cachedShip && gameId == cachedGame && cachedSources.SetEquals(sources)) return;
         consumers.Clear();
         cachedSources.Clear();
         cachedSources.UnionWith(sources);
@@ -61,9 +65,10 @@ internal sealed class CameraScreens
         {
             if (RenderState.Alive(renderer) && known.Add(renderer.Pointer)) consumers.Add(renderer);
         }
-        if (!discovered || scene != cachedScene)
+        if (!discovered || scene != cachedScene || shipId != cachedShip)
         {
             cachedScene = scene;
+            cachedShip = shipId;
             discovered = true;
             sceneConsumers.Clear();
             foreach (var shadow in UnityEngine.Object.FindObjectsOfType<ShadowCollab>())

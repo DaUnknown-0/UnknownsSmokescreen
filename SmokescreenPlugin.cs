@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.10";
+    public const string Version = "1.0.0";
 
     internal static ManualLogSource Logger;
 
@@ -254,6 +254,8 @@ internal static class Texts
     private static bool german;
     private static long languageAfter;
 
+    internal static bool IsGerman => German;
+
     private static bool German
     {
         get
@@ -313,7 +315,7 @@ internal static class Texts
         ["menu.allow"] = ("Allow last flagged text", "Letzten Treffer erlauben"),
         ["menu.allow.clear"] = ("Clear allowlist", "Ausnahmen löschen"),
         ["menu.vision.hint"] = ("Crew hides your real vision range from viewers. You also see only the crew radius.", "Crew verbirgt deine Sichtweite vor Zuschauern. Auch du siehst nur den Crew-Radius."),
-        ["menu.leak.hint"] = ("Samples masked visible text for role words and colours. Reports privately.", "Prueft maskierte Texte begrenzt auf Rollenwoerter und Farben. Meldung privat."),
+        ["menu.leak.hint"] = ("Samples masked visible text for role words and colours. Reports privately.", "Prüft maskierte Texte auf Rollenwörter und Rollenfarben. Meldung privat."),
         ["menu.chat.hint"] = ("Private hides even meeting chat from viewers. Public role logs and team chats can reveal roles.", "Privat verbirgt auch den Meeting-Chat vor Zuschauern. Öffentliche Rollenlogs und Teamchats können Rollen verraten."),
         ["menu.meeting.hint"] = ("Guesser selection, Swapper and Mayor controls become private.", "Guesser-Auswahl, Swapper und Mayor-Bedienung werden privat."),
         ["menu.audio.hint"] = ("Muting known TOR role sounds silences them for you too. Public alarms stay audible.", "Stumm schaltet bekannte TOR-Rollentöne auch für dich aus. Öffentliche Alarme bleiben hörbar."),
@@ -329,9 +331,9 @@ internal static class Texts
         ["menu.flashes"] = ("Hide role flashes", "Rollenblitze verbergen"),
         ["menu.flashes.hint"] = ("Hides coloured screen flashes of role abilities from the camera.", "Verbirgt farbige Bildschirmblitze von Rollenfähigkeiten vor der Kamera."),
         ["menu.overlay"] = ("Private HUD", "Privates HUD"),
-        ["menu.overlay.hint"] = ("Shows the real HUD in a Windows capture-excluded window. Verify your OBS source under Aufnahme.", "Zeigt das echte HUD in einem von Windows aufnahmegeschützten Fenster. Prüfe deine OBS-Quelle unter Aufnahme."),
+        ["menu.overlay.hint"] = ("Shows the real HUD in a Windows capture-excluded window. Verify your OBS source under Capture.", "Zeigt das echte HUD in einem von Windows aufnahmegeschützten Fenster. Prüfe deine OBS-Quelle unter Aufnahme."),
         ["menu.feed"] = ("Recording feed", "Aufnahme-Feed"),
-        ["menu.feed.hint"] = ("Allows manual session unlock under Aufnahme. The unlocked feed can reveal your real view.", "Erlaubt die manuelle Sitzungsfreigabe unter Aufnahme. Der freigegebene Feed zeigt die echte Sicht."),
+        ["menu.feed.hint"] = ("Allows manual session unlock under Capture. The unlocked feed can reveal your real view.", "Erlaubt die manuelle Sitzungsfreigabe unter Aufnahme. Der freigegebene Feed zeigt die echte Sicht."),
         ["menu.feed.warning"] = ("Recording feed is ON: the feed window shows your real view. Keep it out of every live scene.", "Aufnahme-Feed ist AN: das Feed-Fenster zeigt deine echte Sicht. Aus jeder Live-Szene heraushalten."),
         ["menu.key.overlay"] = ("HUD key", "HUD-Taste"),
         ["menu.key.overlay.hint"] = ("Key that shows or hides the private HUD. Click, then press a key (Esc cancels).", "Taste zum Ein- und Ausblenden des privaten HUD. Klicken, dann Taste drücken (Esc bricht ab)."),
