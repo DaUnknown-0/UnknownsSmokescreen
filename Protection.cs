@@ -32,9 +32,12 @@ internal static class Protection
             if (!Shield.Active) return Texts.T(OverlayHost.Verified ? "protection.wait.verified" : "protection.wait.inactive");
             if (!MaskFresh) return Texts.T("protection.mask.pending");
             if (!SmokescreenPlugin.PrivateOverlay.Value) return Texts.T("protection.hud.off");
+            if (!OverlayContent.DirectPresentation) return Texts.T("protection.hud.backend");
+            if (GpuPresenter.Error != 0) return Texts.F("protection.hud.gpu", GpuPresenter.Error);
             if (!OverlayHost.Verified) return Texts.T("protection.hud.pending");
             if (OverlayHost.HiddenByUser) return Texts.T("protection.hud.hidden");
             if (!OverlayHost.GameForeground) return Texts.T("protection.hud.paused");
+            if (!CaptureSelfTest.Approved) return CaptureSelfTest.Status;
             if (Environment.TickCount64 - OverlayHost.LastCapture > 1500 || !OverlayHost.Shown)
                 return Texts.T("protection.hud.stale");
             if (SmokescreenPlugin.CrewVision.Value && !crewRendered) return Texts.T("protection.vision");

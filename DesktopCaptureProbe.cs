@@ -22,7 +22,7 @@ internal sealed unsafe class DesktopCaptureProbe : IDisposable
     private static readonly Guid SurfaceInteropId = new("a9b3d012-3df2-4ee3-b8d1-8695f457d3c1");
     private static readonly Guid ClosableId = new("30d5a829-7fa4-4026-83bb-d75bae4ea99e");
 
-    private IntPtr device, context, output, staging;
+    private IntPtr device, context, output, staging, duplication;
     private readonly Native.RECT region;
     private readonly IntPtr monitor;
     private readonly int size;
@@ -118,24 +118,57 @@ internal sealed unsafe class DesktopCaptureProbe : IDisposable
         finally { Release(factory); }
     }
 
-    internal uint[] Duplicate()
+    [StructLayout(LayoutKind.Sequential)]
+    private struct InitialData { internal IntPtr Data; internal uint Pitch, SlicePitch; }
+
+    internal CompositionImage MenuImage(IntPtr window, uint[] menu)
     {
-        IntPtr duplication = IntPtr.Zero, resource = IntPtr.Zero;
-        Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr*, int>)Slot(output, 22))(output, device, &duplication));
+        var desc = new TextureDescription { Width = size, Height = size, Mips = 1, ArraySize = 1,
+            Format = Bgra8, Samples = 1 };
+        uint* pixels = stackalloc uint[size * size];
+        for (int y = 0; y < size; y++)
+        for (int x = 0; x < size; x++)
+            pixels[(size - 1 - y) * size + x] = menu[y * size + x] | 0xff000000u;
+        var data = new InitialData { Data = (IntPtr)pixels, Pitch = (uint)size * 4 };
+        IntPtr texture;
+        Check(((delegate* unmanaged[Stdcall]<IntPtr, TextureDescription*, InitialData*, IntPtr*, int>)Slot(device, 5))
+            (device, &desc, &data, &texture));
         try
         {
-            FrameInfo info;
-            int hr = ((delegate* unmanaged[Stdcall]<IntPtr, uint, FrameInfo*, IntPtr*, int>)Slot(duplication, 8))
-                (duplication, 400, &info, &resource);
-            if (hr == WaitTimeout) return null;
-            Check(hr);
-            try { return ReadTexture(resource); }
-            finally { ((delegate* unmanaged[Stdcall]<IntPtr, int>)Slot(duplication, 14))(duplication); }
+            var image = new CompositionImage(window, texture, size, size);
+            try { image.Draw(texture, size, size); return image; }
+            catch { image.Dispose(); throw; }
         }
-        finally { Release(resource); Release(duplication); }
+        finally { Release(texture); }
     }
 
-    internal uint[] WindowsGraphics()
+    internal void StartDuplication()
+    {
+        IntPtr created;
+        Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, IntPtr*, int>)Slot(output, 22))(output, device, &created));
+        duplication = created;
+    }
+
+    internal int LastAcquireResult { get; private set; }
+
+    internal uint[] Duplicate()
+    {
+        FrameInfo info;
+        IntPtr resource;
+        int hr = ((delegate* unmanaged[Stdcall]<IntPtr, uint, FrameInfo*, IntPtr*, int>)Slot(duplication, 8))
+            (duplication, 200, &info, &resource);
+        LastAcquireResult = hr;
+        if (hr == WaitTimeout) return null;
+        Check(hr);
+        try { return ReadTexture(resource); }
+        finally
+        {
+            Release(resource);
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, int>)Slot(duplication, 14))(duplication));
+        }
+    }
+
+    internal uint[] WindowsGraphics(IntPtr window = default)
     {
         Check(RoInitialize(1));
         IntPtr interop = IntPtr.Zero, item = IntPtr.Zero, factory = IntPtr.Zero, graphicsDevice = IntPtr.Zero;
@@ -144,10 +177,11 @@ internal sealed unsafe class DesktopCaptureProbe : IDisposable
         {
             interop = Factory("Windows.Graphics.Capture.GraphicsCaptureItem", ItemInteropId);
             var itemId = ItemId;
-            Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, Guid*, IntPtr*, int>)Slot(interop, 4))(interop, monitor, &itemId, &item));
+            Check(((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, Guid*, IntPtr*, int>)Slot(interop, window == IntPtr.Zero ? 4 : 3))(interop, window == IntPtr.Zero ? monitor : window, &itemId, &item));
             Native.SIZE dimensions;
             Check(((delegate* unmanaged[Stdcall]<IntPtr, Native.SIZE*, int>)Slot(item, 7))(item, &dimensions));
-            if (region.right > dimensions.cx || region.bottom > dimensions.cy) return null;
+            var crop = window == IntPtr.Zero ? region : new Native.RECT { right = size, bottom = size };
+            if (crop.right > dimensions.cx || crop.bottom > dimensions.cy) return null;
             var dxgiDevice = Query(device, DxgiDeviceId);
             try { Check(CreateDirect3D11DeviceFromDXGIDevice(dxgiDevice, out graphicsDevice)); }
             finally { Release(dxgiDevice); }
@@ -170,7 +204,7 @@ internal sealed unsafe class DesktopCaptureProbe : IDisposable
                         access = Query(surface, SurfaceInteropId);
                         var textureId = TextureId;
                         Check(((delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)Slot(access, 3))(access, &textureId, &texture));
-                        return CopyRegion(texture);
+                        return CopyRegion(texture, crop);
                     }
                     finally { Release(texture); Release(access); Release(surface); Close(frame); }
                 }
@@ -194,16 +228,17 @@ internal sealed unsafe class DesktopCaptureProbe : IDisposable
     private uint[] ReadTexture(IntPtr resource)
     {
         var texture = Query(resource, TextureId);
-        try { return CopyRegion(texture); }
+        try { return CopyRegion(texture, region); }
         finally { Release(texture); }
     }
 
-    private uint[] CopyRegion(IntPtr texture)
+    private uint[] CopyRegion(IntPtr texture, Native.RECT crop)
     {
         TextureDescription desc;
         ((delegate* unmanaged[Stdcall]<IntPtr, TextureDescription*, void>)Slot(texture, 10))(texture, &desc);
-        if (desc.Format != Bgra8 || region.right > desc.Width || region.bottom > desc.Height) return null;
-        var box = new Box { Left = region.left, Top = region.top, Right = region.right, Bottom = region.bottom, Back = 1 };
+        if (desc.Format != Bgra8 || crop.right > desc.Width || crop.bottom > desc.Height)
+            throw new NotSupportedException($"Aufnahmetextur {desc.Width}x{desc.Height}, Format {desc.Format}, Bereich {crop.right}x{crop.bottom}");
+        var box = new Box { Left = crop.left, Top = crop.top, Right = crop.right, Bottom = crop.bottom, Back = 1 };
         ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, uint, uint, uint, IntPtr, uint, Box*, void>)Slot(context, 46))
             (context, staging, 0, 0, 0, 0, texture, 0, &box);
         Mapped map;
@@ -221,11 +256,12 @@ internal sealed unsafe class DesktopCaptureProbe : IDisposable
 
     public void Dispose()
     {
+        Release(duplication);
         Release(staging);
         Release(context);
         Release(device);
         Release(output);
-        staging = context = device = output = IntPtr.Zero;
+        duplication = staging = context = device = output = IntPtr.Zero;
     }
 
     private static IntPtr Factory(string name, Guid iid)

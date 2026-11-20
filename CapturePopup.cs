@@ -36,18 +36,13 @@ internal sealed unsafe class CapturePopup : IDisposable
         }
     }
 
+    internal IntPtr Window => window;
+    internal bool ShowComposition(int x, int y, int size) => Exists && (!protect || Verified)
+        && OverlayHost.SetLayeredWindowAttributes(window, 0, 255, 2)
+        && SetWindowPos(window, new IntPtr(-1), x, y, size, size, 0x0050) && Native.IsWindowVisible(window);
+
     internal bool Exists => window != IntPtr.Zero;
     internal bool Verified => OverlayHost.IsCaptureExcluded(window);
-
-    internal bool Pattern(int x, int y, int size, uint first, uint second)
-    {
-        if (!Exists) return false;
-        surface.Ensure(size, size);
-        for (int row = 0; row < size; row++)
-        for (int col = 0; col < size; col++)
-            surface.Bits[row * size + col] = ((row / (size / 4) + col / (size / 4)) & 1) == 0 ? first : second;
-        return Present(x, y);
-    }
 
     internal bool Warning(int x, int y, int w, string message)
     {

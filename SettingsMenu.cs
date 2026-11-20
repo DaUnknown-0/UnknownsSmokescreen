@@ -219,9 +219,6 @@ internal static class SettingsMenu
         Button("Minus", -2.0f, row[4], 0.55f, () => "-", () => Neutral, "menu.fps.hint", () => Step(SmokescreenPlugin.OverlayFps, -1, 5, 30));
         Button("Rate", -1.17f, row[4], 1.05f, () => SmokescreenPlugin.OverlayFps.Value + " fps", () => Neutral, "menu.fps.hint", null);
         Button("Plus", -0.34f, row[4], 0.55f, () => "+", () => Neutral, "menu.fps.hint", () => Step(SmokescreenPlugin.OverlayFps, 1, 5, 30));
-        Button("SyncMinus", 0.34f, row[4], 0.55f, () => "-", () => Neutral, "menu.sync.hint", () => Step(SmokescreenPlugin.SyncFrames, -1, 0, 4));
-        Button("Sync", 1.17f, row[4], 1.05f, () => T("menu.sync") + " " + SmokescreenPlugin.SyncFrames.Value, () => Neutral, "menu.sync.hint", null);
-        Button("SyncPlus", 2.0f, row[4], 0.55f, () => "+", () => Neutral, "menu.sync.hint", () => Step(SmokescreenPlugin.SyncFrames, 1, 0, 4));
         }
         // Ueber anderen HUD-Elementen (z. B. Hilfe-Knoepfe anderer Mods) zeichnen.
         foreach (var r in popup.GetComponentsInChildren<Renderer>(true)) r.sortingOrder = Math.Max(r.sortingOrder, 0) + 2000;
@@ -275,16 +272,6 @@ internal static class SettingsMenu
             () => Neutral, "menu.profile.hint", Profiles.Cycle);
         KeyButton(1.17f, 1.25f, "menu.key.profile", SmokescreenPlugin.ProfileHotkey);
         Choice(-1.17f, 0.62f, "hold", SmokescreenPlugin.HoldHud);
-        Toggle(1.17f, 0.62f, () => T("menu.adaptive"), SmokescreenPlugin.AdaptiveHudRate, "menu.adaptive.hint");
-        Button("BudgetMinus", -2.0f, -0.01f, 0.55f, () => "-", () => Neutral, "menu.budget.hint",
-            () => Step(SmokescreenPlugin.HudBudget, -1, 5, 50));
-        Button("Budget", -1.17f, -0.01f, 1.05f,
-            () => Texts.F("menu.budget.value", SmokescreenPlugin.HudBudget.Value / 10, SmokescreenPlugin.HudBudget.Value % 10),
-            () => Neutral, "menu.budget.hint", null);
-        Button("BudgetPlus", -0.34f, -0.01f, 0.55f, () => "+", () => Neutral, "menu.budget.hint",
-            () => Step(SmokescreenPlugin.HudBudget, 1, 5, 50));
-        Button("HudRate", 1.17f, -0.01f, 2.2f, () => Texts.F("menu.rate.effective", OverlayContent.EffectiveHudRate),
-            () => Neutral, "menu.rate.effective.hint", null);
         Button("ProfileDetails", 0, -0.64f, 4.4f, () => T("menu.profile.detail." + Profiles.Current),
             () => Neutral, "menu.profile.hint", null);
     }

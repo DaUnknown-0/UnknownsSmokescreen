@@ -46,7 +46,7 @@ internal static class DesktopDisplay
     {
         internal bool SameLayout(ClientArea other) => Window == other.Window && Monitor == other.Monitor
             && Dpi == other.Dpi && Width == other.Width && Height == other.Height;
-        internal bool FitsPixelBudget => Width > 0 && Height > 0 && (long)Width * Height <= 3840L * 2160;
+        internal bool HasArea => Width > 0 && Height > 0;
     }
 
     // Der aufrufende Fensterthread arbeitet im Per-Monitor-V2-Kontext.
@@ -58,6 +58,31 @@ internal static class DesktopDisplay
         var rect = info.client;
         return new ClientArea(window, monitor, GetDpiForWindow(window), rect.left, rect.top,
             rect.right - rect.left, rect.bottom - rect.top);
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DisplayDevice
+    {
+        public int size;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string name;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string description;
+        public uint flags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string id, key;
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplayDevicesW(string adapter, uint index, ref DisplayDevice device, uint flags);
+
+    internal static string ApprovalKey(ClientArea area)
+    {
+        var monitor = new MonitorInfo { size = Marshal.SizeOf<MonitorInfo>() };
+        var device = new DisplayDevice { size = Marshal.SizeOf<DisplayDevice>() };
+        var window = new WindowInfo { size = (uint)Marshal.SizeOf<WindowInfo>() };
+        if (!area.HasArea || !GetMonitorInfoW(area.Monitor, ref monitor)
+            || !GetWindowInfo(area.Window, ref window)) return null;
+        // Ohne PnP-Monitor (virtueller Ausgang) ist nur die Kennung der aktuellen Sitzung stabil.
+        string id = EnumDisplayDevicesW(monitor.device, 0, ref device, 1) && !string.IsNullOrEmpty(device.id)
+            ? device.id : $"output-{area.Monitor:X}-{System.Diagnostics.Process.GetCurrentProcess().SessionId}";
+        return $"{typeof(DesktopDisplay).Module.ModuleVersionId}|{Environment.OSVersion.Version}|{monitor.device}|{id}|{monitor.monitor.right-monitor.monitor.left}x{monitor.monitor.bottom-monitor.monitor.top}|{area.Width}x{area.Height}|{area.Dpi}|{window.style & ~0x2000u}|{window.extendedStyle}";
     }
 
     internal static (int width, int height) Resolution()

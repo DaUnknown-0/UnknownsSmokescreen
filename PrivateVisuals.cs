@@ -18,25 +18,19 @@ public static class PrivateVisuals
     private static readonly Dictionary<long, Visual> visuals = new();
     private static readonly List<long> destroyed = new();
     private static long lastToken;
-    internal static int Revision { get; private set; }
 
     public static long RegisterRenderer(Renderer renderer) => Add(renderer, null);
     public static long RegisterTree(GameObject root) => Add(root, null);
     public static long RegisterText(TextMeshPro text, string publicText) => Add(text, publicText);
 
     public static bool Unregister(long token)
-    {
-        if (!visuals.Remove(token)) return false;
-        Revision++;
-        return true;
-    }
+        => visuals.Remove(token);
 
     private static long Add(Object target, string publicText)
     {
         if (!RenderState.Alive(target) || target == null) return 0;
         long token = ++lastToken;
         visuals.Add(token, new Visual(target, publicText));
-        Revision++;
         return token;
     }
 
@@ -73,6 +67,5 @@ public static class PrivateVisuals
     {
         visuals.Clear();
         destroyed.Clear();
-        Revision++;
     }
 }

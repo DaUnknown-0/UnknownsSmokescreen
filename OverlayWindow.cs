@@ -1,7 +1,5 @@
 // Copyright (C) 2026 DaUnknown-0. GPL-3.0-or-later.
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -9,8 +7,6 @@ using System.Threading;
 
 namespace UnknownsSmokescreen;
 
-// Eigener Win32-Thread ohne Unity- oder Il2Cpp-Zugriffe. Er baut die Inseln aus den Rohbildern,
-// setzt sie pro Spielframe an ihre Ankerlage und aktualisiert nur das geaenderte Rechteck.
 internal static class OverlayHost
 {
     private static readonly object gate = new();
@@ -26,10 +22,9 @@ internal static class OverlayHost
     private static readonly Native.EnumProc enumerate = FindCandidate;
     private static readonly StringBuilder className = new(256);
     private static readonly uint pid = (uint)Environment.ProcessId;
-    private const uint WM_POSITIONS = 0x8001, WM_CAPTURE = 0x8002, WM_FEED = 0x8003, WM_VISIBILITY = 0x8004;
+    private const uint WM_FEED = 0x8003, WM_VISIBILITY = 0x8004;
     private static string diagnosticDirectory;
     private static long diagnosticDeadline;
-    private static int dumpCount;
     internal static IntPtr GameWindow => game;
     internal static bool GameForeground => game != IntPtr.Zero && Native.GetForegroundWindow() == game && !Native.IsIconic(game);
     // Aufnahme nur fuer ein verifiziert geschuetztes Fenster. Diagnose misst auch ohne Vordergrund, zeigt dann aber nichts.
@@ -50,7 +45,7 @@ internal static class OverlayHost
     {
         if (!show) return;
         show = false;
-        Post(WM_VISIBILITY);
+        Discard();
     }
 
     internal static void Start(bool privateOverlay, bool recordingFeed)
@@ -61,6 +56,8 @@ internal static class OverlayHost
         AffinityFailure = null;
         wantPrivate = privateOverlay; wantRecording = recordingFeed;
         if (!privateOverlay && !recordingFeed) return;
+        LayoutKey = null;
+        Interlocked.Exchange(ref clientSize, 0);
         running = true;
         clientArea = default;
         // Eine alte Testdatei wird absichtlich nie ausgewertet.
@@ -77,14 +74,9 @@ internal static class OverlayHost
     {
         Stop();
         if (thread != null) return;
-        lock (gate)
-        {
-            epoch++;
-            if (pending != null) { free.Push(pending); pending = null; }
-            positionsPending = false; clearRequested = false;
-        }
-        shown = false; hasContent = false; needFull = true; presentedX = presentedY = int.MinValue;
-        historyCount = 0; historyNext = 0;
+        Interlocked.Increment(ref epoch);
+        shown = false; presentedX = int.MinValue;
+        OverlayContent.ResetOutput();
         Start(privateOverlay, recordingFeed);
         SmokescreenPlugin.Logger.LogInfo($"HUD-Fenster neu gestartet: privat={privateOverlay}, Feed={recordingFeed}");
     }
@@ -97,111 +89,44 @@ internal static class OverlayHost
     }
     internal static void EndDiagnostic() { diagnosticDirectory = null; }
 
-    // --- Uebergabe vom Hauptthread ------------------------------------------------------------------
+    internal static volatile string LayoutKey;
+    private static int layout;
+    internal static int Layout => Volatile.Read(ref layout);
+    private static int epoch, readyEpoch = -1;
+    private static long lastCaptureAt;
+    internal static int Epoch => Volatile.Read(ref epoch);
+    internal static IntPtr PrivateWindow => protectedWindow ? priv : IntPtr.Zero;
+    internal static void FrameReady(int frameEpoch)
+    {
+        Volatile.Write(ref readyEpoch, frameEpoch);
+        Interlocked.Exchange(ref lastCaptureAt, Environment.TickCount64);
+    }
 
-    internal sealed class CaptureSet
-    {
-        internal byte[] Atlas = Array.Empty<byte>();
-        internal IslandDesc[] Islands = new IslandDesc[64];
-        internal int Stride, AtlasWidth, AtlasHeight, Width, Height, Count, Epoch, Geometry;
-        internal float Ortho;
-        internal long CapturedAt;
-        internal bool Empty;
-    }
-    private static readonly Stack<CaptureSet> free = new(new[] { new CaptureSet(), new CaptureSet(), new CaptureSet() });
-    private static CaptureSet pending;
-    private static int epoch;
-    private static bool clearRequested;
-    private static readonly AnchorPositions incoming = new(), current = new();
-    // Die Swapchain des Spiels zeigt einen Frame spaeter als DWM das Overlay. Verankerte Inseln nutzen deshalb
-    // die Ankerlage von SyncFrames Frames zuvor. Ringpuffer der letzten acht Lagen, nur Fensterthread.
-    private static readonly AnchorPositions[] history = { new(), new(), new(), new(), new(), new(), new(), new() };
-    private static int historyNext, historyCount;
-    // Gezaehlt wird in Spielframes, nicht in verarbeiteten Updates: faellt der Fensterthread kurz zurueck und
-    // fasst Updates zusammen, nimmt er die neueste Lage, die mindestens delay Frames alt ist.
-    private static AnchorPositions Delayed(int delay)
-    {
-        if (historyCount == 0 || delay <= 0) return current;
-        int target = current.Frame - delay;
-        AnchorPositions oldest = current;
-        for (int k = 0; k < historyCount; k++)
-        {
-            var h = history[(historyNext - 1 - k + history.Length * 2) % history.Length];
-            if (h.Frame <= target) return h;
-            oldest = h;
-        }
-        return oldest;
-    }
-    private static bool positionsPending;
-    private static int incomingGeometry;
-    private static int postedPositions, postedCapture;
     private static byte[] feedFill, feedReady;
     private static int feedWidth, feedHeight;
     private static bool feedPending;
 
-    internal static CaptureSet BeginCapture(int w, int h, int atlasWidth, int atlasHeight, int geometry)
+    internal static byte[] PublishFeed(byte[] image, int w, int h)
     {
-        CaptureSet set;
+        if (!running || !FeedWanted) return image;
+        byte[] spare;
         lock (gate)
         {
-            if (free.Count > 0) set = free.Pop();
-            else if (pending != null) { set = pending; pending = null; }
-            else return null;
+            spare = feedReady ?? feedFill;
+            if (feedReady == null) feedFill = null;
+            feedReady = image;
+            feedWidth = w;
+            feedHeight = h;
+            feedPending = true;
         }
-        int bytes = checked(atlasWidth * atlasHeight * 4);
-        if (set.Atlas.Length < bytes) set.Atlas = new byte[bytes];
-        set.Width = w; set.Height = h; set.AtlasWidth = atlasWidth; set.AtlasHeight = atlasHeight;
-        set.Geometry = geometry;
-        set.Stride = atlasWidth * 4; set.Count = 0; set.Empty = false; set.Ortho = 0;
-        set.CapturedAt = Environment.TickCount64;
-        return set;
-    }
-    internal static void EnsureIslands(CaptureSet set, int count)
-    {
-        if (set.Islands.Length < count) set.Islands = new IslandDesc[count + 16];
-    }
-    internal static void CommitCapture(CaptureSet set)
-    {
-        lock (gate) { set.Epoch = epoch; if (pending != null) free.Push(pending); pending = set; }
-        if (Interlocked.Exchange(ref postedCapture, 1) == 0) Post(WM_CAPTURE);
-    }
-    internal static void PublishEmpty(int w, int h, int geometry)
-    {
-        var set = BeginCapture(w, h, 0, 0, geometry);
-        if (set == null) return;
-        set.Empty = true;
-        CommitCapture(set);
-    }
-    internal static void PublishPositions(AnchorPositions positions, int geometry)
-    {
-        lock (gate)
-        {
-            // Eine noch nicht verarbeitete Diagnoseprobe wird nicht von einem spaeteren Frame ueberschrieben.
-            if (positionsPending && incoming.Probe != null) return;
-            incoming.CopyFrom(positions); incomingGeometry = geometry; positionsPending = true;
-        }
-        if (Interlocked.Exchange(ref postedPositions, 1) == 0) Post(WM_POSITIONS);
-    }
-    internal static void PublishFeed(IntPtr rgba, int w, int h)
-    {
-        if (!running || !FeedWanted) return;
-        int bytes = checked(w * h * 4);
-        byte[] buffer;
-        lock (gate) { buffer = feedFill; feedFill = null; }
-        if (buffer == null || buffer.Length != bytes) buffer = new byte[bytes];
-        Marshal.Copy(rgba, buffer, 0, bytes);
-        lock (gate) { feedFill = feedReady; feedReady = buffer; feedWidth = w; feedHeight = h; feedPending = true; }
         Post(WM_FEED);
+        return spare;
     }
     internal static void Discard()
     {
-        lock (gate)
-        {
-            epoch++;
-            if (pending != null) { free.Push(pending); pending = null; }
-            positionsPending = false; clearRequested = true;
-        }
-        Post(WM_CAPTURE);
+        Interlocked.Increment(ref epoch);
+        Interlocked.Exchange(ref lastCaptureAt, 0);
+        Post(WM_VISIBILITY);
     }
     private static void Post(uint message)
     {
@@ -211,157 +136,22 @@ internal static class OverlayHost
 
     // --- Fensterthread ------------------------------------------------------------------------------
 
-    private static LayerSurface surface;
-    private static LayerSurface scaledSurface;
     private static DesktopDisplay.ClientArea clientArea;
     private static bool layoutChanged;
-    private static int geometryVersion, contentEpoch;
-    internal static int GeometryVersion => Volatile.Read(ref geometryVersion);
+    private static long clientSize;
+    internal static long ClientSize => Interlocked.Read(ref clientSize);
     private static FeedSurface recording;
-    private static readonly Composer composer = new();
-    private static Island[] poolA = new Island[0], poolB = new Island[0];
-    private static bool usePoolA;
-    private static int[] distance;
-    private static byte[] claimed;
-    private static byte[] truth;
-    private static int presentedWidth, presentedHeight, presentedX = int.MinValue, presentedY = int.MinValue;
     private static volatile bool shown;
-    private static bool hasContent, needFull = true;
-    private static long buildTicks, captures, captureTicks, moves, moveTicks, presents, platePixels, seeds, workerReportAt, lastCaptureAt;
-
-    private static unsafe void ProcessCapture()
-    {
-        Interlocked.Exchange(ref postedCapture, 0);
-        CaptureSet set; bool clear;
-        lock (gate) { set = pending; pending = null; clear = clearRequested; clearRequested = false; }
-        if (clear)
-        {
-            Hide();
-            composer.Clear(); hasContent = false;
-            historyCount = historyNext = current.Count = 0;
-            current.Probe = null; current.Ortho = 0; current.BlockWorld = false;
-            Interlocked.Exchange(ref lastCaptureAt, 0);
-        }
-        if (set == null) return;
-        try
-        {
-            if (set.Epoch != Volatile.Read(ref epoch) || set.Geometry != GeometryVersion || surface == null) return;
-            long start = Stopwatch.GetTimestamp();
-            if (surface.Ensure(set.Width, set.Height)) { composer.Attach(surface.Bits, set.Width, set.Height); needFull = true; }
-            var pool = usePoolA ? poolA : poolB;
-            if (pool.Length < set.Count)
-            {
-                var grown = new Island[set.Count + 8];
-                Array.Copy(pool, grown, pool.Length);
-                for (int i = pool.Length; i < grown.Length; i++) grown[i] = new Island();
-                pool = grown;
-                if (usePoolA) poolA = pool; else poolB = pool;
-            }
-            usePoolA = !usePoolA;
-            int n = set.Empty ? 0 : set.Count;
-            if (n > 0)
-            {
-                int screen = set.Width * set.Height;
-                if (claimed == null || claimed.Length != screen) claimed = new byte[screen]; else Array.Clear(claimed, 0, screen);
-                fixed (byte* atlas = set.Atlas)
-                    for (int i = 0; i < n; i++)
-                    {
-                        IslandBuilder.Build(atlas, set.Stride, in set.Islands[i], set.Height, pool[i], ref distance, claimed, set.Width);
-                        platePixels += pool[i].PlatePixels; seeds += pool[i].Seeds;
-                    }
-            }
-            buildTicks += Stopwatch.GetTimestamp() - start;
-            hasContent = true;
-            contentEpoch = set.Epoch;
-            Interlocked.Exchange(ref lastCaptureAt, set.CapturedAt);
-            if (composer.Replace(pool, n, set.Ortho, Delayed(current.Delay), out int x0, out int y0, out int x1, out int y1, current.BlockWorld)) Present(x0, y0, x1, y1);
-            captures++; captureTicks += Stopwatch.GetTimestamp() - start;
-            Report();
-        }
-        finally { lock (gate) free.Push(set); }
-    }
-
-    private static void ProcessPositions()
-    {
-        Interlocked.Exchange(ref postedPositions, 0);
-        lock (gate)
-        {
-            if (!positionsPending) return;
-            positionsPending = false;
-            if (incomingGeometry != GeometryVersion) return;
-            current.CopyFrom(incoming);
-        }
-        history[historyNext].CopyFrom(current); historyNext = (historyNext + 1) % history.Length; historyCount = Math.Min(historyCount + 1, history.Length);
-        long start = Stopwatch.GetTimestamp();
-        var display = Delayed(current.Delay);
-        bool probed = false; int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
-        if (current.Probe != null)
-        {
-            // Diagnose vergleicht mit dem echten Bild genau dieses Frames: dafuer ohne Verzoegerung komponieren.
-            // Das dabei geaenderte Rechteck (alte dargestellte Lage) muss mit dargestellt werden, sonst bleibt sie stehen.
-            probed = composer.Move(current, out px0, out py0, out px1, out py1, current.BlockWorld);
-            try { DumpProbe(current.Probe, current.Frame); }
-            catch (Exception e) { diagnosticDirectory = null; SmokescreenPlugin.Logger.LogWarning("HUD-Diagnose: " + e.Message); }
-        }
-        bool moved = composer.Move(display, out int x0, out int y0, out int x1, out int y1, current.BlockWorld);
-        if (probed)
-        {
-            if (!moved) { x0 = px0; y0 = py0; x1 = px1; y1 = py1; }
-            else { x0 = Math.Min(x0, px0); y0 = Math.Min(y0, py0); x1 = Math.Max(x1, px1); y1 = Math.Max(y1, py1); }
-            moved = true;
-        }
-        if (moved) Present(x0, y0, x1, y1);
-        moves++; moveTicks += Stopwatch.GetTimestamp() - start;
-    }
-
+    private static int presentedWidth, presentedHeight, presentedX = int.MinValue, presentedY;
     private static void ProcessFeed()
     {
         byte[] data; int w, h;
-        lock (gate) { if (!feedPending) return; feedPending = false; data = feedReady; w = feedWidth; h = feedHeight; }
+        lock (gate) { if (!feedPending) return; feedPending = false; data = feedReady; feedReady = null; w = feedWidth; h = feedHeight; }
         if (!running || rec == IntPtr.Zero || data == null) return;
-        if (truth == null || truth.Length != data.Length) truth = new byte[data.Length];
-        unsafe
-        {
-            fixed (byte* source = data)
-            fixed (byte* target = truth)
-                PixelDifference.Copy(source, source, target, null, w, h);
-        }
-        recording.Upload(truth, w, h);
+        recording.Upload(data, w, h);
+        lock (gate) feedFill ??= data;
         Native.InvalidateRect(rec, IntPtr.Zero, false);
     }
-
-    private static void Report()
-    {
-        if (Environment.TickCount64 < workerReportAt) return;
-        double frequency = Stopwatch.Frequency / 1000.0;
-        SmokescreenPlugin.Logger.LogInfo($"HUD-Fenster: Aufnahmen={captures}, Aufbau={captureTicks / frequency / Math.Max(1, captures):F3} ms (Inseln {buildTicks / frequency / Math.Max(1, captures):F3}), Lagen={moves}, Lage={moveTicks / frequency / Math.Max(1, moves):F3} ms, Ausgaben={presents}, Inseln={composer.Count}, Platte/Aufnahme={platePixels / Math.Max(1, captures)} px, Keime/Aufnahme={seeds / Math.Max(1, captures)}");
-        workerReportAt = Environment.TickCount64 + 15000;
-        buildTicks = captures = captureTicks = moves = moveTicks = presents = platePixels = seeds = 0;
-    }
-
-    private static void Present(int x0, int y0, int x1, int y1)
-    {
-        if (!shown || surface == null) { needFull = true; return; }
-        if (!VerifyRuntime()) return;
-        RefreshGeometry();
-        if (!CanShow()) { Hide(); return; }
-        var area = clientArea;
-        bool full = needFull || area.X != presentedX || area.Y != presentedY || area.Width != presentedWidth || area.Height != presentedHeight;
-        var output = surface;
-        if (surface.Width != area.Width || surface.Height != area.Height)
-        {
-            scaledSurface ??= new LayerSurface();
-            if (!surface.ScaleInto(scaledSurface, area.Width, area.Height)) { Hide(); return; }
-            output = scaledSurface;
-            full = true;
-        }
-        if (!output.Present(priv, area.X, area.Y, full, x0, y0, x1, y1)) { Hide(); return; }
-        presentedX = area.X; presentedY = area.Y; presentedWidth = area.Width; presentedHeight = area.Height;
-        needFull = false; presents++;
-    }
-
-    private static bool CanShow() => show && GameForeground && protectedWindow && Native.IsWindowVisible(game)
-        && hasContent && contentEpoch == Volatile.Read(ref epoch) && surface is { Width: > 0 } && clientArea.FitsPixelBudget;
 
     private static void RefreshGeometry()
     {
@@ -370,35 +160,18 @@ internal static class OverlayHost
         layoutChanged = false;
         clientArea = area;
         if (!newLayout) return;
+        LayoutKey = DesktopDisplay.ApprovalKey(area);
+        Interlocked.Increment(ref layout);
         Hide();
         Discard();
-        Interlocked.Increment(ref geometryVersion);
+        Interlocked.Exchange(ref clientSize, ((long)area.Width << 32) | (uint)area.Height);
         if (area.Window != IntPtr.Zero)
             SmokescreenPlugin.Logger.LogInfo($"HUD-Fensterfläche: {area.Width}x{area.Height} bei {area.X},{area.Y}, Fenster-DPI={area.Dpi}, Monitor=0x{area.Monitor:X}");
     }
     private static void Hide()
     {
         if (priv != IntPtr.Zero && shown) Native.ShowWindow(priv, 0);
-        shown = false; needFull = true;
-    }
-
-    private static unsafe void DumpProbe(string label, int frame)
-    {
-        string directory = DiagnosticDirectory;
-        if (directory == null || surface == null || dumpCount >= 64) return;
-        dumpCount++;
-        Directory.CreateDirectory(directory);
-        string prefix = Path.Combine(directory, label + "_" + frame);
-        BitmapFile.Write(prefix + "_overlay.bmp", surface.Bits, surface.Width, surface.Height);
-        var text = new StringBuilder();
-        text.Append($"frame={frame} t={Environment.TickCount64} captured={lastCaptureAt} islands={composer.Count} positions={current.Count} ortho={current.Ortho}\n");
-        var pool = usePoolA ? poolB : poolA;
-        for (int i = 0; i < composer.Count && i < pool.Length; i++)
-        {
-            var s = pool[i];
-            text.Append($"island key={s.Key:X} x={s.X} y={s.Y} w={s.W} h={s.H} drawn={s.Drawn} dx={s.DrawX - s.X} dy={s.DrawY - s.Y} plate={s.PlatePixels} alpha={s.AlphaPixels} seeds={s.Seeds}\n");
-        }
-        File.WriteAllText(prefix + "_overlay.txt", text.ToString());
+        shown = false;
     }
 
     private static bool FindCandidate(IntPtr hwnd, IntPtr unused)
@@ -468,7 +241,7 @@ internal static class OverlayHost
             issue = WindowProtection.CheckRead(read, affinity, false);
             if (issue == WindowProtection.Problem.None)
             {
-                surface = new LayerSurface();
+                if (!SetLayeredWindowAttributes(priv, 0, 255, 2)) throw new InvalidOperationException("Fensterdeckkraft fehlt");
                 protectedWindow = true;
                 SmokescreenPlugin.Logger.LogInfo($"Privates HUD: WDA_EXCLUDEFROMCAPTURE bestätigt (0x{affinity:X}), Per-Monitor V2={PerMonitorDpiScope.IsPerMonitorV2(priv)}, {system.Log}");
                 return;
@@ -518,10 +291,10 @@ internal static class OverlayHost
             protectedWindow=false;
             if(priv!=IntPtr.Zero) { Native.ShowWindow(priv,0); Native.DestroyWindow(priv); }
             if(rec!=IntPtr.Zero) Native.DestroyWindow(rec);
-            unsafe { composer.Attach(null,0,0); }
-            surface?.Dispose(); recording?.Dispose(); priv=rec=IntPtr.Zero; surface=null; recording=null;
-            scaledSurface?.Dispose(); scaledSurface = null;
-            lock(gate) { truth=null; if(pending!=null) free.Push(pending); pending=null; feedFill=feedReady=null; }
+
+            recording?.Dispose(); priv=rec=IntPtr.Zero; recording=null;
+
+            lock(gate) { feedFill=feedReady=null; feedPending=false; }
             Native.UnregisterClassW(cls,instance);
         }
     }
@@ -529,10 +302,10 @@ internal static class OverlayHost
     {
         try
         {
-            if(msg==WM_POSITIONS) { ProcessPositions(); return IntPtr.Zero; }
-            if(msg==WM_CAPTURE) { ProcessCapture(); return IntPtr.Zero; }
+
+
             if(msg==WM_FEED) { ProcessFeed(); return IntPtr.Zero; }
-            if(msg==WM_VISIBILITY) { if (!show) Hide(); return IntPtr.Zero; }
+            if(msg==WM_VISIBILITY) { if (!show || readyEpoch != Epoch) Hide(); return IntPtr.Zero; }
             if (hwnd == priv && (msg == Native.WM_DPICHANGED || msg == Native.WM_DISPLAYCHANGE))
             {
                 layoutChanged = true;
@@ -561,23 +334,29 @@ internal static class OverlayHost
         bool safe = VerifyRuntime();
         if(game==IntPtr.Zero || !Native.IsWindow(game)) Native.EnumWindows(enumerate,IntPtr.Zero);
         if (priv != IntPtr.Zero) RefreshGeometry();
-        ProcessCapture();
-        ProcessPositions();
         ProcessFeed();
-        if(priv==IntPtr.Zero) return;
-        // Kein Freilegen des Fake-Bilds bei kurzen Renderpausen. Freigabe am Frameende.
-        if(!safe || !CanShow()) { Hide(); return; }
-        if(!shown)
+        if (safe && CaptureSelfTest.ProbePosition(readyEpoch, out int x, out int y, out int size))
         {
-            shown=true; needFull=true;
-            Present(0,0,surface.Width,surface.Height);
-            if(shown) Native.ShowWindow(priv,4);
+            if (!shown) shown = SetWindowPos(priv, new IntPtr(-1), x, y, size, size, 0x0050);
+            presentedX = int.MinValue;
+            return;
         }
-        else if (clientArea.X != presentedX || clientArea.Y != presentedY)
-            Present(0, 0, surface.Width, surface.Height);
+        if (!safe || !CaptureSelfTest.Approved || !show || !GameForeground || !clientArea.HasArea ||
+            readyEpoch != Epoch || GpuPresenter.Error != 0) { Hide(); return; }
+        if (!shown || presentedX != clientArea.X || presentedY != clientArea.Y ||
+            presentedWidth != clientArea.Width || presentedHeight != clientArea.Height)
+        {
+            shown = SetWindowPos(priv, new IntPtr(-1), clientArea.X, clientArea.Y,
+                clientArea.Width, clientArea.Height, 0x0010 | 0x0040);
+            presentedX = clientArea.X; presentedY = clientArea.Y;
+            presentedWidth = clientArea.Width; presentedHeight = clientArea.Height;
+        }
     }
 
-    // Persistente DIB, in die der Komponist direkt schreibt.
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
+    [DllImport("user32.dll")] internal static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint key, byte alpha, uint flags);
+
+    // Persistente DIB für Warnungen und Aufnahmeprüfungen.
     internal sealed unsafe class LayerSurface : IDisposable
     {
         private IntPtr dc,bmp,previous,bits;
@@ -603,15 +382,6 @@ internal static class OverlayHost
             var info=new Native.ULWINFO { cbSize=(uint)sizeof(Native.ULWINFO), pptDst=&dst, psize=&size, hdcSrc=dc, pptSrc=&src, pblend=&blend, dwFlags=Native.ULW_ALPHA, prcDirty=full?null:&dirty };
             Native.GdiFlush();
             return Native.UpdateLayeredWindowIndirect(hwnd,&info);
-        }
-        internal bool ScaleInto(LayerSurface target, int width, int height)
-        {
-            target.Ensure(width, height);
-            Native.GdiFlush();
-            new Span<uint>(target.Bits, width * height).Clear();
-            // AlphaBlend skaliert die vormultiplizierten Pixel auf eine transparente DIB.
-            return Native.AlphaBlend(target.Dc, 0, 0, width, height, Dc, 0, 0, Width, Height,
-                new Native.BLENDFUNCTION { SourceConstantAlpha = 255, AlphaFormat = 1 });
         }
         public void Dispose() { if(bmp!=IntPtr.Zero) { Native.SelectObject(dc,previous); Native.DeleteObject(bmp); } if(dc!=IntPtr.Zero) Native.DeleteDC(dc); dc=bmp=bits=IntPtr.Zero; Width=Height=0; }
     }
@@ -667,8 +437,6 @@ internal static class Native
     [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
     [DllImport("gdi32.dll")] public static extern bool StretchBlt(IntPtr target,int x,int y,int w,int h,IntPtr source,int sx,int sy,int sw,int sh,uint op);
     [DllImport("gdi32.dll")] public static extern bool PatBlt(IntPtr target,int x,int y,int w,int h,uint op);
-    [DllImport("msimg32.dll")] public static extern bool AlphaBlend(IntPtr target, int x, int y, int w, int h,
-        IntPtr source, int sx, int sy, int sw, int sh, BLENDFUNCTION blend);
     [DllImport("dwmapi.dll")] public static extern int DwmIsCompositionEnabled(out bool enabled);
     [DllImport("ntdll.dll")] public static extern int RtlGetVersion(ref OSVERSION version);
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

@@ -48,10 +48,10 @@ internal static class RenderState
         var original = target.fontSharedMaterial;
         var neutral = NeutralMaterial(original);
         bool gradient = target.enableVertexGradient;
-        if (!gradient && neutral == original) return;
+        if (!gradient && neutral?.Pointer == original?.Pointer) return;
         textStyles.TryAdd(target.Pointer, (original, gradient));
         if (gradient) target.enableVertexGradient = false;
-        if (neutral != original) target.fontSharedMaterial = neutral;
+        if (neutral?.Pointer != original?.Pointer) target.fontSharedMaterial = neutral;
     }
 
     private static Material NeutralMaterial(Material original)
@@ -359,16 +359,35 @@ public sealed class CameraMaskScope : MonoBehaviour
     private static int appliedFrame = -1;
     internal static int LastMaskedFrame { get; private set; } = -1;
     private static bool entered;
+    private static int failedFrame = -1;
+    private static readonly List<(Camera camera, int mask, CameraClearFlags clear, Color color, Rect rect)> blanked = new();
+    private Camera owner;
+    private void Blank()
+    {
+        if (!RenderState.Alive(owner)) owner = GetComponent<Camera>();
+        if (!RenderState.Alive(owner)) return;
+        blanked.Add((owner, owner.cullingMask, owner.clearFlags, owner.backgroundColor, owner.rect));
+        owner.cullingMask = 0;
+        owner.rect = new Rect(0, 0, 1, 1);
+        owner.clearFlags = CameraClearFlags.SolidColor;
+        owner.backgroundColor = Color.black;
+    }
+
     internal static long Applications, Restores;
     internal static double ApplyMilliseconds;
     private void OnPreCull()
     {
-        if (OverlayContent.Stopped || OverlayContent.Rendering || !Shield.Active || appliedFrame == Time.frameCount) return;
+        if (OverlayContent.Stopped || OverlayContent.Rendering || !Shield.Active) return;
+        if (failedFrame == Time.frameCount) { Blank(); return; }
+        if (appliedFrame == Time.frameCount) return;
+        try { OverlayContent.BeforeMask(); }
+        catch (Exception) { OverlayContent.Rendering = false; }
         appliedFrame = Time.frameCount;
         var start = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             entered = true;
+            OverlayContent.RestorePublicBindings();
             VisionMask.Apply();
             Mask.Apply();
             RenderState.Flush();
@@ -377,8 +396,10 @@ public sealed class CameraMaskScope : MonoBehaviour
         }
         catch (Exception e)
         {
+            failedFrame = Time.frameCount;
+            Blank();
             Protection.InvalidateMask();
-            Restore();
+            OverlayHost.Discard();
             SmokescreenPlugin.Logger.LogWarning("Render-Maske: " + e.Message);
         }
         finally { ApplyMilliseconds += (System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000.0 / System.Diagnostics.Stopwatch.Frequency; }
@@ -398,6 +419,16 @@ public sealed class CameraMaskScope : MonoBehaviour
     {
         if (!entered) return;
         entered = false;
+        for (int i = blanked.Count - 1; i >= 0; i--)
+        {
+            var saved = blanked[i];
+            if (!RenderState.Alive(saved.camera)) continue;
+            saved.camera.cullingMask = saved.mask;
+            saved.camera.clearFlags = saved.clear;
+            saved.camera.backgroundColor = saved.color;
+            saved.camera.rect = saved.rect;
+        }
+        blanked.Clear();
         try { Mask.RestoreAll(); }
         finally { VisionMask.Restore(); }
         Restores++;

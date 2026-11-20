@@ -63,7 +63,7 @@ public class SmokescreenRunner : MonoBehaviour
         bool started = false;
         try
         {
-            started = AmongUsClient.Instance != null
+            started = RenderState.Alive(AmongUsClient.Instance)
                 && AmongUsClient.Instance.GameState == InnerNet.InnerNetClient.GameStates.Started;
         }
         catch { }
@@ -79,6 +79,7 @@ public class SmokescreenRunner : MonoBehaviour
         }
         wasStarted = started;
 
+        CaptureSelfTest.SetRound(started || RenderState.Alive(ShipStatus.Instance));
         SettingsMenu.Tick();
         bool active = Shield.Active;
         RoundOutputs.Tick(started);
@@ -106,7 +107,6 @@ internal static class Mask
         RestoreAll();
         RenderState.ReleaseNeutralMaterials();
         rendererCache.Clear();
-        PrivateSet.Reset();
         Arrows.RemoveAll(a => a == null || !Alive(a.arrow));
         phoneUi = null;
         infoCache.Clear();
@@ -161,17 +161,19 @@ internal static class Mask
     public static void Apply()
     {
         var local = PlayerControl.LocalPlayer;
-        if (!Alive(local) || local.Data == null) return;
+        if (!Alive(local) || !Alive(local.Data)) return;
         bool dead = local.Data.IsDead;
         hideWorldNames = Tor.HidePlayerNames;
         var meeting = MeetingHud.Instance;
 
-        foreach (var p in PlayerControl.AllPlayerControls)
+        var players = PlayerControl.AllPlayerControls;
+        for (int i = 0; i < players.Count; i++)
         {
-            if (!Alive(p) || p.Data == null || p.cosmetics == null) continue;
+            var p = players[i];
+            if (!Alive(p) || !Alive(p.Data) || !Alive(p.cosmetics)) continue;
             if (Alive(p.cosmetics.nameText)) CleanName(p.cosmetics.nameText, p.PlayerId);
             var info = InfoAbove(p);
-            if (info != null) RenderState.PublicText(info, InfoFor(p, local, dead, false), Color.white, true);
+            if (Alive(info)) RenderState.PublicText(info, InfoFor(p, local, dead, false), Color.white, true);
             ClearOutline(p);
         }
 
@@ -236,7 +238,7 @@ internal static class Mask
         if (infoCache.TryGetValue(parent.Pointer, out var cached) && Alive(cached)) return cached;
         var t = parent.FindChild("Info");
         var tmp = Alive(t) ? t.GetComponent<TMP_Text>() : null;
-        if (tmp != null) infoCache[parent.Pointer] = tmp;
+        if (Alive(tmp)) infoCache[parent.Pointer] = tmp;
         return tmp;
     }
 
@@ -288,10 +290,10 @@ internal static class Mask
             {
                 CleanName(area.NameText, area.TargetPlayerId, true);
                 var info = Alive(area.NameText.transform.parent) ? InfoUnder(area.NameText.transform.parent) : null;
-                if (info != null)
+                if (Alive(info))
                 {
                     var p = Helpers.playerById(area.TargetPlayerId);
-                    RenderState.PublicText(info, results || p == null ? "" : InfoFor(p, local, dead, true), Color.white, true);
+                    RenderState.PublicText(info, results || !Alive(p) ? "" : InfoFor(p, local, dead, true), Color.white, true);
                 }
             }
 
@@ -328,7 +330,7 @@ internal static class Mask
         for (int i = 0; i < root.childCount; i++)
         {
             var hit = FindDeep(root.GetChild(i), name);
-            if (hit != null) return hit;
+            if (Alive(hit)) return hit;
         }
         return null;
     }
@@ -376,7 +378,7 @@ internal static class Mask
     {
         // Kill target (red), Sheriff/Medic/Tracker/... targets (role colour): all through this material value.
         var body = p.cosmetics.currentBodySprite;
-        if (body == null || !Alive(body.BodySprite)) return;
+        if (body is null || !Alive(body.BodySprite)) return;
         var mat = body.BodySprite.material;
         if (Alive(mat)) RenderState.Float(mat, OutlineId, 0f, body.BodySprite);
     }

@@ -26,7 +26,7 @@ public class SmokescreenPlugin : BasePlugin
 {
     public const string Guid = "com.daunknown.smokescreen";
     public const string Name = "Unknown's Smokescreen";
-    public const string Version = "0.3.0.9";
+    public const string Version = "0.3.0.10";
 
     internal static ManualLogSource Logger;
 
@@ -40,10 +40,8 @@ public class SmokescreenPlugin : BasePlugin
     internal static ConfigEntry<KeyCode> MenuHotkey;
     internal static ConfigEntry<KeyCode> ProfileHotkey;
     internal static ConfigEntry<Profile> ActiveProfile;
-    internal static ConfigEntry<bool> HoldHud, AdaptiveHudRate;
-    internal static ConfigEntry<int> HudBudget;
+    internal static ConfigEntry<bool> HoldHud;
     internal static ConfigEntry<int> OverlayFps;
-    internal static ConfigEntry<int> SyncFrames;
     internal static ConfigEntry<bool> DiagnosticMode;
     internal static ConfigEntry<bool> CrewVision, LeakWatch, PrivateChat, PrivateMeetings, NeutralAudio;
     internal static ConfigEntry<string> LeakAllowlist;
@@ -108,15 +106,16 @@ public class SmokescreenPlugin : BasePlugin
         ProfileHotkey = Config.Bind("Profiles", "SwitchKey", KeyCode.F5, "Ausgabeprofil wechseln.");
         ActiveProfile.SettingChanged += (_, _) => Profiles.Changed();
         HoldHud = Config.Bind("Overlay", "HoldKey", false, "Privates HUD nur bei gehaltener HUD-Taste anzeigen.");
-        AdaptiveHudRate = Config.Bind("Overlay", "AdaptiveRate", false, "Private HUD-Rate an die gemessene Last anpassen.");
-        HudBudget = Config.Bind("Overlay", "BudgetTenthsMs", 15,
-            new ConfigDescription("Mittleres Zeitbudget für private HUD-Aufnahmen pro Spielframe in Zehntelmillisekunden (5 bis 50).", new AcceptableValueRange<int>(5, 50)));
-        OverlayFps = Config.Bind("Overlay", "FramesPerSecond", 15, new ConfigDescription("Bildrate des privaten HUD, 5 bis 30.", new AcceptableValueRange<int>(5, 30)));
-        SyncFrames = Config.Bind("Overlay", "SyncFrames", 1, new ConfigDescription("Frames the game image is shown later than the private HUD. Names and labels that move with players use the position from this many frames ago (0 to 4).", new AcceptableValueRange<int>(0, 4)));
+        OverlayFps = Config.Bind("Overlay", "FramesPerSecond", 15, new ConfigDescription("Bildrate des freigegebenen RecordingFeeds, 5 bis 30.", new AcceptableValueRange<int>(5, 30)));
         DiagnosticMode = Config.Bind("Diagnostics", "Enabled", false, "Expliziter Diagnoselauf, maximal 180 Sekunden. Kein Umgehen von Fokus oder Aufnahmeschutz.");
 
         // Alte Schlüssel zunächst binden, damit sie aus den verwaisten Config-Einträgen
         // übernommen und beim anschließenden Speichern vollständig entfernt werden.
+        Config.Bind("Overlay", "AdaptiveRate", false, "Veralteter Eintrag");
+        Config.Bind("Overlay", "BudgetTenthsMs", 15, "Veralteter Eintrag");
+        Config.Bind("Overlay", "SyncFrames", 1, "Veralteter Eintrag");
+        foreach (string key in new[] { "AdaptiveRate", "BudgetTenthsMs", "SyncFrames" })
+            Config.Remove(new ConfigDefinition("Overlay", key));
         Config.Bind("Mask", "ShuffleMode", "", "Veralteter Eintrag");
         Config.Remove(new ConfigDefinition("Mask", "ShuffleMode"));
         Config.Bind("Mask", "ShuffleGhostInfo", true, "Veralteter Eintrag");
@@ -339,10 +338,7 @@ internal static class Texts
         ["menu.key.menu"] = ("Menu key", "Menütaste"),
         ["menu.key.menu.hint"] = ("Key that opens this menu. Click, then press a key (Esc cancels).", "Taste, die dieses Menü öffnet. Klicken, dann Taste drücken (Esc bricht ab)."),
         ["menu.key.press"] = ("Press a key...", "Taste drücken..."),
-        ["menu.fps.hint"] = ("How often the private HUD content is refreshed (5 to 30). Its position follows every frame.", "Wie oft der Inhalt des privaten HUD erneuert wird (5 bis 30). Die Lage folgt jedem Frame."),
-        ["menu.sync"] = ("HUD sync", "HUD-Sync"),
-        ["menu.sync.frames"] = ("{0} frames", "{0} Frames"),
-        ["menu.sync.hint"] = ("If private names or labels run ahead of players while walking, increase; if they trail, decrease. Applies instantly.", "Laufen private Namen beim Gehen den Spielern voraus, erhöhen; hängen sie hinterher, verringern. Wirkt sofort."),
+        ["menu.fps.hint"] = ("Refresh rate of the unlocked recording feed (5 to 30 fps).", "Bildrate des freigegebenen Aufnahmefeeds (5 bis 30 fps)."),
         ["menu.diagnostics"] = ("Diagnostics", "Diagnose"),
         ["menu.diagnostics.hint"] = ("Logs overlay timings for 180 seconds of the next protected round. Only for troubleshooting.", "Protokolliert 180 Sekunden lang Overlay-Zeiten der nächsten geschützten Runde. Nur zur Fehlersuche."),
         ["menu.saved"] = ("Changes apply immediately and are saved to the config file.", "Änderungen wirken sofort und werden in die Config gespeichert."),
@@ -364,6 +360,11 @@ internal static class Texts
         ["protection.wait.verified"] = ("Waiting for round, window verified", "Wartet auf Runde, Fenster verifiziert"),
         ["protection.wait.inactive"] = ("Waiting for round, window inactive", "Wartet auf Runde, Fenster inaktiv"),
         ["protection.mask.pending"] = ("Mask render unconfirmed", "Maskenrender unbestätigt"),
+        ["protection.hud.backend"] = ("Private HUD requires D3D11", "Privates HUD benötigt D3D11"),
+        ["protection.hud.gpu"] = ("Private GPU output interrupted (0x{0:X8})", "Private GPU-Ausgabe unterbrochen (0x{0:X8})"),
+        ["capture.test.menu"] = ("Menu image or capture control unavailable.", "Menübild oder Aufnahmekontrolle nicht prüfbar."),
+        ["capture.test.preflight"] = ("Run the capture test for this layout.", "Aufnahmetest für dieses Layout starten."),
+        ["capture.test.blocked"] = ("Capture test failed ({0}). See Capture for details.", "Aufnahmetest für {0} nicht bestanden. Details unter Aufnahme."),
         ["protection.hud.off"] = ("Mask active, private HUD off", "Maske aktiv, privates HUD aus"),
         ["protection.hud.pending"] = ("Mask active, window unconfirmed", "Maske aktiv, Fenster unbestätigt"),
         ["protection.hud.hidden"] = ("Mask active, private HUD hidden", "Maske aktiv, privates HUD verborgen"),
@@ -411,19 +412,13 @@ internal static class Texts
         ["menu.hold.on"] = ("HUD key: Hold", "HUD-Taste: Halten"),
         ["menu.hold.off"] = ("HUD key: Toggle", "HUD-Taste: Schalten"),
         ["menu.hold.hint"] = ("Hold the HUD key to see private content. Release to hide it.", "HUD-Taste halten, um private Inhalte zu sehen. Loslassen blendet sie aus."),
-        ["menu.adaptive"] = ("Adaptive rate", "Adaptive Rate"),
-        ["menu.adaptive.hint"] = ("Adjust private HUD capture rate within the configured FPS limit.", "Passt die private HUD-Aufnahmerate bis zur eingestellten FPS-Grenze an."),
-        ["menu.budget.value"] = ("{0}.{1} ms", "{0},{1} ms"),
-        ["menu.budget.hint"] = ("Time budget for private HUD captures per game frame. Applies with adaptive rate enabled.", "Zeitbudget für private HUD-Aufnahmen pro Spielframe. Gilt bei adaptiver Rate."),
-        ["menu.rate.effective"] = ("HUD target: {0} fps", "HUD-Ziel: {0} fps"),
-        ["menu.rate.effective.hint"] = ("Current private HUD capture target. Unchanged images can be skipped.", "Aktuelles Aufnahmeziel des privaten HUD. Gleiche Bilder können übersprungen werden."),
         ["menu.feed.permission"] = ("Allow feed", "Feed erlauben"),
         ["menu.feed.unlock"] = ("Unlock feed", "Feed freigeben"),
         ["menu.feed.lock"] = ("Lock feed", "Feed sperren"),
         ["menu.feed.warning.short"] = ("Feed unlocked. Original view is capturable.", "Aufnahme-Feed frei. Originalsicht aufnehmbar."),
         ["menu.capture.watch.label"] = ("OBS watcher", "OBS-Wächter"),
         ["menu.capture.testing"] = ("Testing ...", "Prüfe ..."),
-        ["menu.capture.start"] = ("Start capture test", "Aufnahmetest starten"),
+        ["menu.capture.start"] = ("Pre-stream test", "Test vor Stream"),
         ["menu.capture.replay.label"] = ("Buffer replay", "Rückblick puffern"),
         ["menu.capture.export.label"] = ("Export replay frames", "Rückblick als Bildfolge speichern"),
         ["menu.capture.excluded"] = ("excluded", "frei"),
@@ -448,7 +443,7 @@ internal static class Texts
         ["capture.replay.saved"] = ("Saved to BepInEx/SmokescreenReplays/{0}", "Gespeichert in BepInEx/SmokescreenReplays/{0}"),
         ["capture.replay.failed"] = ("Replay export failed", "Bildexport fehlgeschlagen"),
         ["menu.capture.watch"] = ("Warns privately when known capture software and a protection issue are detected.", "Warnt privat bei erkannten Aufnahmeprogrammen und Schutzproblemen."),
-        ["menu.capture.test"] = ("Tests GDI, Desktop Duplication and Windows Graphics Capture on this monitor.", "Prüft GDI, Desktop Duplication und Windows Graphics Capture auf diesem Monitor."),
+        ["menu.capture.test"] = ("Test capture protection in the menu or during play.", "Aufnahmeschutz im Menü oder in der Runde prüfen."),
         ["menu.capture.result"] = ("Green applies to the tested monitor method. Verify Game Capture and Window Capture in your OBS scene.", "Grün gilt für den getesteten Bildschirmweg. Spiel- und Fensteraufnahme in der OBS-Szene prüfen."),
         ["menu.capture.unlock"] = ("First allow the feed under General. Unlock makes the real view capturable until you lock it or quit.", "Zuerst den Feed unter Allgemein erlauben. Die Freigabe macht die echte Sicht bis zur Sperre oder zum Beenden aufnehmbar."),
         ["menu.capture.replay"] = ("Keeps up to 30 seconds of the real camera view in memory in protected rounds.", "Hält bis zu 30 Sekunden der echten Kamerasicht in geschützten Runden im Speicher."),
